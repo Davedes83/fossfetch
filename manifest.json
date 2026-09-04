@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "davedes.fossfetch",
+  "name": "FossFetch",
+  "version": "1.0.0",
+  "author": "davedes",
+  "license": "MIT",
+  "description": "Search for open-source alternatives to proprietary apps and install them with one click (pacman / AUR / Flatpak).",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "FossFetch",
+    "description": "Search for open-source alternatives to proprietary apps",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "panelWidth": 560,
+      "debounceMs": 150
+    },
+    "schema": [
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 360,
+        "max": 900,
+        "step": 20,
+        "defaultValue": 560,
+        "description": "Width of the search popup, in the shell's spacing units."
+      },
+      {
+        "key": "debounceMs",
+        "type": "integer",
+        "label": "Search debounce",
+        "min": 0,
+        "max": 500,
+        "step": 25,
+        "defaultValue": 150,
+        "description": "Milliseconds to wait after typing before filtering results. Smoother on large lists."
+      }
+    ]
+  }
+}
