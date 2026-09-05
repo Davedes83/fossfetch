@@ -5,11 +5,11 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// FossFetch browse panel. Two search-driven tabs list FOSS apps — Pacman
-// (Arch repos) and Flatpak (Flathub) — each with one-click install. Results
-// come straight from live `pacman -Ss` / `flatpak search`; metadata (repo,
-// version, arch, license) and a website/GitHub link are enriched via
-// `pacman -Si` / Flatpak appstream info.
+// FossFetch browse panel. Three search-driven tabs list FOSS apps — Pacman
+// (Arch repos), Flatpak (Flathub) and AUR (Yay/Paru) — each with one-click
+// install. Results come straight from live `pacman -Ss` / `flatpak search` /
+// the AUR RPC; metadata (repo, version, arch, license) and a website/GitHub
+// link are enriched via `pacman -Si` / Flatpak appstream info.
 Panel {
   id: root
   moduleName: "davedes.fossfetch"
@@ -25,10 +25,132 @@ Panel {
 
   readonly property var barIdentity: hostWidget || root
 
+  // ------------------------------------------------------------ theme palette
+  // The shell only exposes foreground/background/accent/urgent/muted via the
+  // Color singleton, but every theme ships a full extended palette in
+  // colors.toml (green, cyan, blue, yellow, red, accent…). Read it from the
+  // active theme copy so buttons, the confirm state and highlights blend with
+  // whatever theme is running instead of being locked to Catppuccin pastels.
+  property var themeColors: ({})
+  function themeColor(name, fallback) {
+    var v = root.themeColors[name]
+    return (typeof v === "string" && v.length > 0) ? v : fallback
+  }
+  readonly property color pacmanColor:    root.themeColor("green",  "#a6e3a1")
+  readonly property color aurColor:       root.themeColor("cyan",   "#94e2d5")
+  readonly property color flatpakColor:   root.themeColor("blue",   "#89b4fa")
+  readonly property color confirmColor:   root.themeColor("yellow", "#f9e2af")
+
+  FileView {
+    path: Color.home + "/.local/state/omarchy/current/theme/colors.toml"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.loadThemeColors(text())
+    onLoadFailed: root.themeColors = ({})
+  }
+
+  function loadThemeColors(raw) {
+    var parsed = {}
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var m = lines[i].match(/^\s*([A-Za-z0-9_-]+)\s*=\s*"?(#[0-9A-Fa-f]{6})/)
+      if (m) parsed[m[1]] = m[2]
+    }
+    root.themeColors = parsed
+  }
+
   // --------------------------------------------------------------- tabs
   property int activeTab: 0
   readonly property bool isPacman: activeTab === 0
+  readonly property bool isFlatpak: activeTab === 1
+  readonly property bool isAur: activeTab === 2
   property string query: ""
+
+  // --------------------------------------------------- options (persisted)
+  // User-facing switches: whether the AUR / Flatpak tabs are shown, and which
+  // AUR helper the install buttons use. Persisted to the shared omarchy
+  // settings dir so the choices stick across shell restarts.
+  property bool flatpakEnabled: true
+  property bool aurEnabled: true
+  property string aurHelper: "yay"
+  property bool showCoffeeButton: true
+  property bool showOptions: false
+
+  function setFlatpakEnabled(v) {
+    root.flatpakEnabled = !!v
+    if (!root.flatpakEnabled && root.activeTab === 1) root.switchTab(0)
+    root.persistOptions()
+  }
+
+  function setAurEnabled(v) {
+    root.aurEnabled = !!v
+    if (!root.aurEnabled && root.activeTab === 2) root.switchTab(0)
+    root.persistOptions()
+  }
+
+  function setAurHelper(v) {
+    root.aurHelper = v === "paru" ? "paru" : "yay"
+    root.persistOptions()
+  }
+
+  function setShowCoffeeButton(v) {
+    root.showCoffeeButton = !!v
+    root.persistOptions()
+  }
+
+  // ---------------------------------------------------- toolbar icon design
+  // Visual style applied to the "Find App" pill in the top bar. One of:
+  // current | outline | soft | bold | minimal. The panel itself keeps its
+  // stock look; this setting is pushed to the BarWidget so the button in the
+  // bar restyles itself live.
+  property string panelDesign: "current"
+
+  function setPanelDesign(d) {
+    var valid = ["current", "outline", "soft", "bold", "minimal", "icon"]
+    if (valid.indexOf(d) === -1) return
+    root.panelDesign = d
+    root.persistOptions()
+    if (root.hostWidget && root.hostWidget.setToolbarDesign)
+      root.hostWidget.setToolbarDesign(d)
+  }
+
+  function persistOptions() {
+    optionsFile.setText(JSON.stringify({
+      flatpak: root.flatpakEnabled,
+      aur: root.aurEnabled,
+      aurHelper: root.aurHelper,
+      design: root.panelDesign,
+      showCoffee: root.showCoffeeButton
+    }, null, 2) + "\n")
+  }
+
+  FileView {
+    id: optionsFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
+    watchChanges: false
+    printErrors: false
+    onLoaded: {
+      try {
+        var data = JSON.parse(text())
+        if (typeof data.flatpak === "boolean") root.flatpakEnabled = data.flatpak
+        if (typeof data.aur === "boolean") root.aurEnabled = data.aur
+        if (data.aurHelper === "yay" || data.aurHelper === "paru") root.aurHelper = data.aurHelper
+        if (typeof data.showCoffee === "boolean") root.showCoffeeButton = data.showCoffee
+        if (["current", "outline", "soft", "bold", "minimal", "icon"].indexOf(data.design) !== -1) root.panelDesign = data.design
+        if (root.hostWidget && root.hostWidget.setToolbarDesign)
+          root.hostWidget.setToolbarDesign(root.panelDesign)
+      } catch (e) { /* keep defaults */ }
+    }
+  }
+
+  // Enabled tab ids in their on-screen order (Pacman -> AUR -> Flatpak).
+  function visibleTabs() {
+    var list = [0]
+    if (root.aurEnabled) list.push(2)
+    if (root.flatpakEnabled) list.push(1)
+    return list
+  }
 
   function switchTab(t) {
     if (activeTab === t) return
@@ -38,12 +160,31 @@ Panel {
     refreshFocus()
   }
 
-  function tabLabel()        { return isPacman ? "Arch repos (Pacman)" : "Flathub (Flatpak)" }
-  function tabCaption()      { return isPacman ? "Search pacman packages" : "Search Flatpak apps" }
-  function tabPlaceholder()  { return isPacman ? "Search Arch package… (gimp, obs, audacity)" : "Search a Flatpak app… (gimp, obs, libreoffice)" }
+  function tabLabel() {
+    if (isPacman) return "Arch repos (Pacman)"
+    if (isFlatpak) return "Flathub (Flatpak)"
+    return "AUR (Yay / Paru)"
+  }
+  function tabCaption() {
+    if (isPacman) return "Search pacman packages"
+    if (isFlatpak) return "Search Flatpak apps"
+    return "Search AUR packages"
+  }
+  function tabPlaceholder() {
+    if (isPacman) return "Search Arch package… (gimp, obs, audacity)"
+    if (isFlatpak) return "Search a Flatpak app… (gimp, obs, libreoffice)"
+    return "Search AUR package… (spotify, google-chrome, vscode-bin)"
+  }
 
   function resolveThumb(remote, iconName) {
-    if (remote !== "") return remote
+    if (remote !== "") {
+      // Bare local paths (e.g. AppStream-catalog or icon-theme hits) must be
+      // wrapped in a file:// URL — Image.source won't load a raw path,
+      // matching how omarchy's own iconSource() resolves local files.
+      var s = String(remote)
+      if (s.indexOf("file://") === 0 || s.indexOf("https://") === 0 || s.indexOf("http://") === 0) return s
+      return Util.fileUrl(s)
+    }
     var local = iconName !== "" ? Quickshell.iconPath(iconName, true) : ""
     return local !== "" ? local : ""
   }
@@ -73,6 +214,31 @@ Panel {
   // Stays to at most two short lines so it fits within the fixed card height:
   //   Version: 154.0-1 · Repo: extra
   //   Arch: x86_64 · License: MPL-2.0
+  // Human-readable date for a card's "Updated" line. Accepts an AUR epoch,
+  // a pacman "Fri 05 Sep 2026 …" build-date string, or an ISO-8601 date.
+  function fmtUpdated(raw) {
+    var s = String(raw || "").trim()
+    if (!s) return ""
+    var d = null
+    if (/^\d+$/.test(s)) {
+      d = new Date(Number(s) * 1000)
+    } else {
+      var m = s.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d{1,2}) ([A-Z][a-z]{2}) (\d{4})/)
+      if (m) {
+        var months = {Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+                      Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11}
+        var mn = months[m[2]]
+        if (mn !== undefined) d = new Date(Date.UTC(Number(m[3]), mn, Number(m[1])))
+      } else {
+        var iso = s.match(/(\d{4})-(\d{2})-(\d{2})/)
+        if (iso) d = new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])))
+      }
+    }
+    if (!d || isNaN(d.getTime())) return s
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return d.getUTCDate() + " " + months[d.getUTCMonth()] + " " + d.getUTCFullYear()
+  }
+
   function detailPoints(e) {
     var v = String((e && e.version) || "").trim()
     var r = String((e && e.repo) || "").trim()
@@ -128,18 +294,56 @@ Panel {
     return "https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/" + id + ".png"
   }
 
+  // Package names that the current query's AppStream category mapping returned
+  // (populated from the "G|pkg1|pkg2|..." marker line in the group search
+  // output). These are boosted in the result ranking so a category query like
+  // "browser" surfaces every browser near the top.
+  property var pendingGroup: ({})
+
   function launchLiveSearch(q) {
     var seq = ++searchSeq
+    root.pendingGroup = ({})
     if (isPacman) {
       pacmanProc.mySeq = seq
       pacmanProc.running = false
-      pacmanProc.command = ["pacman", "-Ss", q]
+      // One shot: resolve the category -> packages mapping for <q>, emit a
+      // "G|pkg1|pkg2|..." marker line, then the normal `pacman -Ss` output
+      // followed by a `pacman -Ss ^(pkg1|pkg2|...)$` whole-category search.
+      // pkg names only come from the local groups index (never from user input).
+      var pacmanScript =
+        "Q=$1; C=$2; GS=$3\n"
+        + "P=$( \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null )\n"
+        + "if [ -n \"$P\" ]; then\n"
+        + "  R=$( printf '%s' \"$P\" | tr '\\n' '|' | sed 's/|$//' )\n"
+        + "  echo \"G|$R\"\n"
+        + "fi\n"
+        + "pacman -Ss \"$Q\"\n"
+        + "if [ -n \"$P\" ]; then pacman -Ss \"^($R)$\"; fi\n"
+      pacmanProc.command = ["sh", "-c", pacmanScript, "fossfetch-groups", q, root.iconCacheDir, root.appstreamGroupsScript]
       pacmanProc.running = true
-    } else {
+    } else if (isFlatpak) {
       flatpakProc.mySeq = seq
       flatpakProc.running = false
-      flatpakProc.command = ["flatpak", "search", "--columns=name,description,application,version", q]
+      // Group rows (app cat + meta) come first, tagged G| with flatpak-search
+      // column order (name, desc, appid, version); then normal search output.
+      var flatpakScript =
+        "Q=$1; C=$2; GS=$3\n"
+        + "python3 \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null |"
+        + " awk -F'\\t' '{print \"G|\"$2\"\\t\"$3\"\\t\"$1\"\\t\"$4\"\\t\"$5}'\n"
+        + "flatpak search --columns=name,description,application,version \"$Q\" |"
+        + " awk -F'\\t' -v idx=\"$C/flathub/appids.tsv\" '"
+        + " BEGIN { while ((getline l < idx) > 0) { split(l, a, \"\\t\"); d[a[1]] = a[2] } close(idx) }"
+        + " NF >= 4 { print $0 (d[$3] != \"\" ? \"\\t\" d[$3] : \"\") }'\n"
+      flatpakProc.command = ["sh", "-c", flatpakScript, "fossfetch-flatpak-groups", q, root.iconCacheDir, root.flathubGroupsScript]
       flatpakProc.running = true
+    } else {
+      aurProc.mySeq = seq
+      aurProc.running = false
+      // AUR has no AppStream categories, so there are no group rows ("G|"
+      // marker) — the RPC `name-desc` search already matches natural phrases
+      // against descriptions. One network call via python3 stdlib.
+      aurProc.command = ["python3", root.aurSearchScript, q]
+      aurProc.running = true
     }
   }
 
@@ -168,6 +372,15 @@ Panel {
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (!line) continue
+      // "G|pkg1|pkg2|..." marker line: category members for this query.
+      if (line.indexOf("G|") === 0) {
+        var members = line.substring(2).split("|")
+        for (var m = 0; m < members.length; m++) {
+          var nm = members[m].trim()
+          if (nm) root.pendingGroup[nm] = true
+        }
+        continue
+      }
       // Indented line: the description of the current package.
       if (line.charAt(0) === " " || line.charAt(0) === "\t") {
         if (pendingName !== "" && pendingDesc === "") pendingDesc = line.trim()
@@ -212,9 +425,14 @@ Panel {
 
     // Rank results so exact / prefix name matches surface before description
     // only hits (firefox sorts above browserpass-firefox, curl-impersonate, ...).
+    // AppStream category members (pendingGroup) get boosted to rank 1 so a
+    // query like "browser" surfaces every browser, above plain prefix/substring
+    // matches but still below an exact package-name hit.
     parsed.sort(function(a, b) {
       var ra = root.pacmanRank(a.name, q)
       var rb = root.pacmanRank(b.name, q)
+      if (root.pendingGroup[a.name] && ra > 1) ra = 1
+      if (root.pendingGroup[b.name] && rb > 1) rb = 1
       if (ra !== rb) return ra - rb
       return a.name.localeCompare(b.name)
     })
@@ -229,6 +447,7 @@ Panel {
         name: info.name, description: info.desc,
         rating: "", website: "", license: "", category: "Pacman",
         repo: info.repo, version: info.version, arch: info.arch, licenses: "",
+        updated: "",
         thumbnail: "", iconName: "", pacmanPkg: info.name, aurPkg: "", flatpakPkg: "",
         _pkg: info.name
       })
@@ -273,6 +492,8 @@ Panel {
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (!line) continue
+      // Group rows carry a "G|" tag (same tab layout as flatpak search output).
+      if (line.indexOf("G|") === 0) line = line.substring(2)
       var parts = line.split("\t")
       if (parts.length < 3) continue
       var appId = parts[2].trim()
@@ -287,6 +508,7 @@ Panel {
         description: (parts[1] || "").trim(),
         rating: "", website: "https://flathub.org/apps/" + appId, license: "", category: "Flatpak",
         repo: "flathub", version: (parts[3] || "").trim(), arch: "", licenses: "",
+        updated: parts.length > 4 ? parts[4].trim() : "",
         thumbnail: flathubIcon(appId), iconName: "", pacmanPkg: "", aurPkg: "", flatpakPkg: appId,
         _pkg: appId
       })
@@ -303,6 +525,73 @@ Panel {
       if (filteredModel.get(i).flatpakPkg === id) return true
     }
     return false
+  }
+
+  // Parse `aur_search.py` output: one row per candidate, tab-separated
+  // name\tdesc\tversion\twebsite\tlicense\tpackagebase\tvotes\tlastmodified.
+  // Ranked by the same name-match scoring as the other tabs so an
+  // exact/prefix package-name hit sorts above description-only matches.
+  function onAurResults(text) {
+    if (aurProc.mySeq !== searchSeq) return
+    var q = root.query.toLowerCase().trim()
+    if (q === "") return
+    var lines = String(text || "").split("\n")
+    var parsed = []
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (!line) continue
+      var parts = line.split("\t")
+      if (parts.length < 6) continue
+      var name = parts[0].trim()
+      if (!name) continue
+      parsed.push({
+        name: name,
+        desc: parts[1].trim(),
+        version: parts[2].trim(),
+        website: parts[3].trim(),
+        license: parts[4].trim(),
+        pkgbase: parts[5].trim(),
+        votes: parts[6] !== undefined ? parts[6].trim() : "",
+        lastModified: parts[7] !== undefined ? parts[7].trim() : ""
+      })
+    }
+    parsed.sort(function(a, b) {
+      var ra = root.pacmanRank(a.name, q)
+      var rb = root.pacmanRank(b.name, q)
+      if (ra !== rb) return ra - rb
+      // Tie-break secondary matches by votes so popular AUR packages float up.
+      var va = parseInt(a.votes, 10) || 0
+      var vb = parseInt(b.votes, 10) || 0
+      if (vb !== va) return vb - va
+      return a.name.localeCompare(b.name)
+    })
+
+    var added = 0
+    for (var j = 0; j < parsed.length && added < 60; j++) {
+      var info = parsed[j]
+      if (root.modelRowIndex(info.name) >= 0) continue
+      filteredModel.append({
+        name: info.name, description: info.desc,
+        rating: "", website: info.website, license: "", category: "AUR",
+        repo: "aur", version: info.version, arch: "", licenses: info.license,
+        updated: info.lastModified,
+        thumbnail: "", iconName: "", pacmanPkg: "", aurPkg: info.name, flatpakPkg: "",
+        _pkg: info.name
+      })
+      added++
+    }
+    // Enrich icons for the newly-added rows (AUR packs usually have no icon;
+    // the batched local/appstream/flathub lookups resolve one by name).
+    enqueueEnrich()
+  }
+
+  Process {
+    id: aurProc
+    property int mySeq: -1
+    running: false
+    stdout: StdioCollector {
+      onStreamFinished: root.onAurResults(text || "")
+    }
   }
 
   Process {
@@ -325,16 +614,24 @@ Panel {
 
   // ---------------------------------------------- icon enrichment (pacman)
   // Best-effort: give icon-less pacman rows an icon. Installed packages get a
-  // locally-installed icon (fast, via per-row filesystem lookup); the rest get
-  // a Flathub icon via a SINGLE batched `flatpak search` per query (mapped by
+  // locally-installed icon (fast, via per-row filesystem lookup); others are
+  // resolved against Arch's published AppStream catalog (one small batched
+  // download of all repo icons, then instant local lookups); the rest get a
+  // Flathub icon via a SINGLE batched `flatpak search` per query (mapped by
   // name), avoiding one slow serialized search per row.
   property var enrichQueue: []
+  property var localQueue: []
   property var flatpakQueue: []
   property bool enrichBusy: false
 
   function enqueueEnrich() {
+    // A prior enrich whose onStreamFinished never fired (e.g. a process that
+    // failed to start) would leave enrichBusy latched and silently disable all
+    // future enrichment, so always reset it when (re)queueing.
+    enrichBusy = false
     enrichQueue = []
     flatpakQueue = []
+    localQueue = []
     for (var i = 0; i < filteredModel.count; i++) {
       var e = filteredModel.get(i)
       if (!e || e.thumbnail !== "" || e.iconName !== "" || e._pkg === undefined || e._pkg === "") continue
@@ -343,17 +640,22 @@ Panel {
     pumpEnrich()
   }
 
-  // Drain local-icon lookups in ONE batched subprocess, then run a single
-  // batched flathub search for the rows still lacking icons.
+  // Resolve icons cheapest-first: the batched AppStream-catalog lookup (a ~MB
+  // catalog already cached on disk → one fast local scan), then the installed
+  // icon-theme lookup (a `pacman -Ql` + /usr/share/icons scan) for rows the
+  // catalog missed, then one batched flathub search for the leftovers.
   function pumpEnrich() {
     if (enrichBusy) return
     if (enrichQueue.length > 0) {
       enrichBusy = true
+      lookupAppstreamIcons()
+      return
+    }
+    if (localQueue.length > 0) {
+      enrichBusy = true
       lookupLocalIcons()
       return
     }
-    // Local pass done — list the remaining rows that still lack icons and run
-    // one flatpak search for all of them at once.
     if (flatpakQueue.length > 0) {
       enrichBusy = true
       launchBatchFlatpak()
@@ -365,11 +667,11 @@ Panel {
   // the installed icon themes (all of /usr/share/icons/*/apps + scalable/apps,
   // plus pixmaps and user icons), handling absolute paths and names with dots
   // or extensions. Emits "I|<pkg>|<path>" per row, "" when none is found (those
-  // rows fall through to the batched flathub lookup).
+  // rows fall through to the AppStream-catalog lookup).
   function lookupLocalIcons() {
     var names = []
-    for (var i = 0; i < enrichQueue.length; i++)
-      if (names.indexOf(enrichQueue[i].pkg) === -1) names.push(enrichQueue[i].pkg)
+    for (var i = 0; i < localQueue.length; i++)
+      if (names.indexOf(localQueue[i].pkg) === -1) names.push(localQueue[i].pkg)
     var script = "DIRS=$(find /usr/share/icons -type d -path '*/apps' -o -type d -path '*/scalable/apps' 2>/dev/null | sort -u)\n"
     script += "resolve(){ p=\"$1\"; icon=$(pacman -Ql \"$p\" 2>/dev/null | grep -m1 '\\.desktop$' | awk '{print $2}'); [ -z \"$icon\" ] && return 1\n"
     script += "nm=$(grep -m1 -oP '^Icon=(.+)$' \"$icon\" 2>/dev/null | cut -d= -f2- | tr -d '\\r' | xargs); [ -z \"$nm\" ] && return 1\n"
@@ -389,6 +691,7 @@ Panel {
     id: localIconProc
     running: false
     stdout: StdioCollector {
+      waitForEnd: true
       onStreamFinished: {
         var out = String(text || "").split("\n")
         for (var i = 0; i < out.length; i++) {
@@ -401,8 +704,55 @@ Panel {
           if (parts[2] !== "") {
             filteredModel.setProperty(idx, "thumbnail", parts[2])
           } else {
+            for (var k = 0; k < root.localQueue.length; k++)
+              if (root.localQueue[k].pkg === parts[1]) { root.flatpakQueue.push(root.localQueue[k]); break }
+          }
+        }
+        root.localQueue = []
+        root.enrichBusy = false
+        root.pumpEnrich()
+      }
+    }
+  }
+
+  // Absolute path to the bundled AppStream-catalog icon resolver.
+  readonly property string appstreamIconScript: Qt.resolvedUrl("./appstream_icons.sh").toString().replace("file://", "")
+  readonly property string appstreamGroupsScript: Qt.resolvedUrl("./appstream_groups.sh").toString().replace("file://", "")
+  readonly property string iconCacheDir: Quickshell.env("HOME") + "/.cache/fossfetch"
+
+  // Resolve every icon-less row against Arch's published AppStream catalog in
+  // one subprocess. The helper downloads the (few-MB) per-repo icon set into
+  // ~/.cache/fossfetch/catalog the first time it runs — then resolves each pkg
+  // by its "<pkg>_<appid>.png" naming convention locally, emitting "I|<pkg>|<path>".
+  function lookupAppstreamIcons() {
+    var names = []
+    for (var i = 0; i < root.enrichQueue.length; i++)
+      if (names.indexOf(root.enrichQueue[i].pkg) === -1) names.push(root.enrichQueue[i].pkg)
+    if (names.length === 0) { root.enrichBusy = false; root.pumpEnrich(); return }
+    appstreamIconProc.command = [appstreamIconScript, "resolve", iconCacheDir].concat(names)
+    appstreamIconProc.running = false
+    appstreamIconProc.running = true
+  }
+
+  Process {
+    id: appstreamIconProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var out = String(text || "").split("\n")
+        for (var i = 0; i < out.length; i++) {
+          var line = out[i]
+          if (!line || line.indexOf("I|") !== 0) continue
+          var parts = line.split("|")
+          if (parts.length < 3) continue
+          var idx = root.rowIndexForPkg(parts[1])
+          if (idx < 0) continue
+          if (parts[2] !== "" && filteredModel.get(idx).thumbnail === "") {
+            filteredModel.setProperty(idx, "thumbnail", parts[2])
+          } else {
             for (var k = 0; k < root.enrichQueue.length; k++)
-              if (root.enrichQueue[k].pkg === parts[1]) { root.flatpakQueue.push(root.enrichQueue[k]); break }
+              if (root.enrichQueue[k].pkg === parts[1]) { root.localQueue.push(root.enrichQueue[k]); break }
           }
         }
         root.enrichQueue = []
@@ -414,6 +764,9 @@ Panel {
 
   // Absolute path to the bundled Flathub-app-id resolver.
   readonly property string flatpakIconScript: Qt.resolvedUrl("./flatpak_icon.py").toString().replace("file://", "")
+  readonly property string flathubGroupsScript: Qt.resolvedUrl("./flathub_groups.py").toString().replace("file://", "")
+  // Absolute path to the bundled AUR search helper (RPC v5, no Auth).
+  readonly property string aurSearchScript: Qt.resolvedUrl("./aur_search.py").toString().replace("file://", "")
 
   // Resolve every icon-less row to its Flathub app id (→ CDN icon) in one
   // subprocess. The helper runs a few candidate `flatpak search` spellings per
@@ -433,6 +786,7 @@ Panel {
     id: enrichQuery
     running: false
     stdout: StdioCollector {
+      waitForEnd: true
       onStreamFinished: {
         root.applyBatchFlatpak(text || "")
         root.enrichBusy = false
@@ -600,12 +954,14 @@ Panel {
       var desc = field("Description")
       var url = field("URL")
       var licenses = field("Licenses")
+      var buildDate = field("Build Date")
       if (repo !== "") filteredModel.setProperty(idx, "repo", repo)
       if (version !== "") filteredModel.setProperty(idx, "version", version)
       if (arch !== "") filteredModel.setProperty(idx, "arch", arch)
       if (desc !== "") filteredModel.setProperty(idx, "description", desc)
       if (url !== "") filteredModel.setProperty(idx, "website", url)
       if (licenses !== "") filteredModel.setProperty(idx, "licenses", licenses)
+      if (buildDate !== "") filteredModel.setProperty(idx, "updated", buildDate)
     }
   }
 
@@ -642,7 +998,8 @@ Panel {
   function runInstall(kind, pkg, name) {
     var args
     if (kind === "pacman") args = ["sudo", "pacman", "-S", "--needed", pkg]
-    else if (kind === "aur") args = ["paru", "-S", "--needed", pkg]
+    else if (kind === "yay") args = ["yay", "-S", "--needed", pkg]
+    else if (kind === "paru") args = ["paru", "-S", "--needed", pkg]
     else args = ["flatpak", "install", "--assumeyes", "flathub", pkg]
 
     // Resolve the user's terminal (falls back to kitty, matching the shell).
@@ -684,7 +1041,31 @@ Panel {
     searchField.selectAll()
   }
 
-  onOpenedChanged: if (opened) refreshFocus()
+  onOpenedChanged: if (opened) {
+    refreshFocus()
+    root.warmGroupIndexes()
+  }
+
+  // Builds the AppStream category indexes (pacman + flatpak) once in the
+  // background when the panel first opens, so the first group search doesn't
+  // stall on a download. The scripts' own staleness checks make this a fast
+  // no-op after the first successful build.
+  property bool groupsWarmed: false
+  function warmGroupIndexes() {
+    if (root.groupsWarmed) return
+    root.groupsWarmed = true
+    var script = "\"" + root.appstreamGroupsScript + "\" ensure \"" + root.iconCacheDir + "\" >/dev/null 2>&1\n"
+    script += "python3 \"" + root.flathubGroupsScript + "\" ensure \"" + root.iconCacheDir + "\" >/dev/null 2>&1\n"
+    groupWarmProc.command = ["sh", "-c", script]
+    groupWarmProc.running = false
+    groupWarmProc.running = true
+  }
+
+  Process {
+    id: groupWarmProc
+    running: false
+    stdout: StdioCollector { waitForEnd: true }
+  }
 
   // --------------------------------------------------------------- keyboard
   function moveCursor(dx, dy) {
@@ -704,9 +1085,14 @@ Panel {
     if (e.website) Qt.openUrlExternally(e.website)
   }
 
-  // Tab cycles the two tabs (0 <-> 1).
+  // Tab cycles through the enabled tabs only (skips ones toggled off).
   function switchPanel(direction) {
-    switchTab(direction > 0 ? 1 - activeTab : 1 - activeTab)
+    var tabs = root.visibleTabs()
+    if (tabs.length < 2) return
+    var idx = tabs.indexOf(root.activeTab)
+    if (idx < 0) idx = 0
+    var next = tabs[(idx + (direction > 0 ? 1 : tabs.length - 1)) % tabs.length]
+    root.switchTab(next)
   }
 
   // ------------------------------------------------------------- the panel
@@ -773,13 +1159,57 @@ Panel {
             }
 
             Text {
-              text: "Browse open-source packages · Pacman + Flathub"
+              text: "Browse open-source packages · Pacman + AUR + Flathub"
               color: Util.alpha(Color.popups.text, 0.52)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               font.letterSpacing: 1.0
               width: parent.width
               elide: Text.ElideRight
+            }
+          }
+
+          // Options gear (top right): toggles the options panel. Shares the
+          // accent glow treatment with the tabs and search bar.
+          Rectangle {
+            id: optionsBtn
+            Layout.preferredWidth: Style.space(22)
+            Layout.preferredHeight: Style.space(20)
+            Layout.alignment: Qt.AlignTop | Qt.AlignCenter
+            radius: Style.cornerRadius
+            color: root.showOptions
+              ? Style.selectedFillFor(Color.popups.text, Color.accent)
+              : (optionsMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
+            border.width: Style.controlBorderWidth(false, optionsMouse.containsMouse)
+            border.color: Style.controlBorder(false, optionsMouse.containsMouse, Color.popups.text, Color.accent)
+            Behavior on border.color { ColorAnimation { duration: 150 } }
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: "transparent"
+              border.color: Util.alpha(Color.accent, 0.6)
+              border.width: 2
+              opacity: optionsMouse.containsMouse ? 0.7 : 0
+              Behavior on opacity { NumberAnimation { duration: 180 } }
+            }
+
+            Text {
+              id: optionsIcon
+              anchors.centerIn: parent
+              text: root.showOptions ? "\uf00d" : "\uf013"
+              color: root.showOptions || optionsMouse.containsMouse ? Color.accent : Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              Behavior on color { ColorAnimation { duration: 150 } }
+            }
+
+            MouseArea {
+              id: optionsMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.showOptions = !root.showOptions
             }
           }
         }
@@ -800,7 +1230,21 @@ Panel {
               active: root.activeTab === 0
               Layout.fillWidth: true
               Layout.fillHeight: true
+              Layout.preferredWidth: 1
+              Layout.minimumWidth: 0
               onClicked: root.switchTab(0)
+            }
+
+            TabButton {
+              id: aurTabBtn
+              text: "AUR"
+              active: root.activeTab === 2
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              Layout.preferredWidth: 1
+              Layout.minimumWidth: 0
+              visible: root.aurEnabled
+              onClicked: root.switchTab(2)
             }
 
             TabButton {
@@ -809,6 +1253,9 @@ Panel {
               active: root.activeTab === 1
               Layout.fillWidth: true
               Layout.fillHeight: true
+              Layout.preferredWidth: 1
+              Layout.minimumWidth: 0
+              visible: root.flatpakEnabled
               onClicked: root.switchTab(1)
             }
           }
@@ -816,6 +1263,225 @@ Panel {
 
         PanelSeparator {
           foreground: Color.popups.text
+        }
+
+        // ------------------------------------------------------ options panel
+        Item {
+          width: parent.width
+          visible: root.showOptions
+          implicitHeight: root.showOptions ? optionsCol.implicitHeight : 0
+
+          Column {
+            id: optionsCol
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Toggle {
+              width: parent.width
+              label: "Flatpak search"
+              description: "Show the Flathub tab and its search results"
+              checked: root.flatpakEnabled
+              onClicked: root.setFlatpakEnabled(!root.flatpakEnabled)
+            }
+
+            Toggle {
+              width: parent.width
+              label: "AUR search"
+              description: "Show the AUR tab and its search results"
+              checked: root.aurEnabled
+              onClicked: root.setAurEnabled(!root.aurEnabled)
+            }
+
+            // AUR install helper picker.
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(30)
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "AUR install uses"
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(6)
+
+                HelperPill {
+                  label: "yay"
+                  selected: root.aurHelper === "yay"
+                  onClicked: root.setAurHelper("yay")
+                }
+                HelperPill {
+                  label: "paru"
+                  selected: root.aurHelper === "paru"
+                  onClicked: root.setAurHelper("paru")
+                }
+              }
+            }
+
+            // Design preset picker — five visual styles for the whole panel.
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(30)
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Design"
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                HelperPill {
+                  glyph: "\u25AA"
+                  label: "Current"
+                  selected: root.panelDesign === "current"
+                  onClicked: root.setPanelDesign("current")
+                }
+                HelperPill {
+                  glyph: "\u25A1"
+                  label: "Outline"
+                  selected: root.panelDesign === "outline"
+                  onClicked: root.setPanelDesign("outline")
+                }
+                HelperPill {
+                  glyph: "\u25CF"
+                  label: "Soft"
+                  selected: root.panelDesign === "soft"
+                  onClicked: root.setPanelDesign("soft")
+                }
+                HelperPill {
+                  glyph: "\u25A0"
+                  label: "Bold"
+                  selected: root.panelDesign === "bold"
+                  onClicked: root.setPanelDesign("bold")
+                }
+                HelperPill {
+                  glyph: "\u25CB"
+                  label: "Minimal"
+                  selected: root.panelDesign === "minimal"
+                  onClicked: root.setPanelDesign("minimal")
+                }
+                HelperPill {
+                  glyph: "\uf00e"
+                  label: "Icon"
+                  selected: root.panelDesign === "icon"
+                  onClicked: root.setPanelDesign("icon")
+                }
+              }
+            }
+
+            // Compact tick for hiding the coffee button — no big switch, just a
+            // small checkbox row.
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(22)
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Buy Me a Coffee"
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Rectangle {
+                id: coffeeBox
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(18)
+                height: Style.space(18)
+                radius: Math.max(2, Style.cornerRadius - 2)
+                color: root.showCoffeeButton
+                  ? Style.selectedFillFor(Color.popups.text, Color.accent)
+                  : (coffeeBoxMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
+                border.width: Style.controlBorderWidth(root.showCoffeeButton, coffeeBoxMouse.containsMouse)
+                border.color: Style.controlBorder(root.showCoffeeButton, coffeeBoxMouse.containsMouse, Color.popups.text, Color.accent)
+                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "\uf00c"
+                  color: root.showCoffeeButton ? Color.accent : "transparent"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                MouseArea {
+                  id: coffeeBoxMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setShowCoffeeButton(!root.showCoffeeButton)
+                }
+              }
+            }
+
+            // Buy Me a Coffee — same button used in the mouse & keybind app.
+            BorderSurface {
+              id: buyButton
+              visible: root.showCoffeeButton
+              x: (parent.width - width) / 2
+              implicitWidth: buyRow.implicitWidth + Style.space(16)
+              implicitHeight: Style.space(22)
+              radius: Style.cornerRadius
+              color: buyHover.hovered ? Util.alpha("#FF813F", 0.22) : Util.alpha("#FF813F", 0.10)
+              borderSpec: Border.controlSpec(buyHover.hovered ? "hover-cursor" : "normal", Color.popups.text, Color.popups.text)
+              Behavior on color { ColorAnimation { duration: 150 } }
+
+              RowLayout {
+                id: buyRow
+                anchors.centerIn: parent
+                spacing: Style.space(3)
+
+                Text {
+                  text: "☕"
+                  color: "#FF813F"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.space(13)
+                }
+                Text {
+                  text: "Buy Me a Coffee"
+                  color: buyHover.hovered ? "#FFB347" : "#FF813F"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption - 1
+                  font.bold: true
+                }
+              }
+
+              MouseArea {
+                id: buyHover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: Qt.openUrlExternally("https://www.paypal.com/paypalme/DavidDesousa13")
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.showCoffeeButton
+              text: "If you find FossFetch helpful, a coffee keeps it brewing."
+              color: Util.alpha(Color.popups.text, 0.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption - 1
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
         }
 
         // --------------------------------------------------------- search bar
@@ -831,6 +1497,18 @@ Panel {
             border.width: Style.controlBorderWidth(searchField.activeFocus, searchField.hovered)
             border.color: Style.controlBorder(searchField.activeFocus, searchField.hovered, Color.popups.text, Color.accent)
             smooth: true
+
+            // Soft outer glow that fades in on hover/focus, matching the
+            // toolbar icon's and tabs' hover ring.
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: "transparent"
+              border.color: Util.alpha(Color.accent, 0.6)
+              border.width: 2
+              opacity: (searchField.hovered || searchField.activeFocus) ? 0.7 : 0
+              Behavior on opacity { NumberAnimation { duration: 180 } }
+            }
 
             Text {
               id: icon
@@ -905,6 +1583,7 @@ Panel {
               required property string version
               required property string arch
               required property string licenses
+              required property string updated
               // Live pacman rows carry a package name under _pkg (absent on
               // flatpak rows) used to resolve the row after async work completes.
               required property string _pkg
@@ -921,11 +1600,26 @@ Panel {
               width: resultsList.width
               height: root.cardHeight
               radius: Style.cornerRadius
+              // Never let any child paint outside the card bounds, no matter
+              // how long a name/description/button label gets.
+              clip: true
               color: isSelected
-                ? Color.menu.selectedBackground
+                ? Util.alpha(Color.accent, 0.14)
                 : (isHovered ? Util.alpha(Color.popups.text, 0.05) : "transparent")
               border.width: isSelected ? Border.uniformWidth(root.selectedBorderSpec) : 0
               border.color: isSelected ? Border.color(root.selectedBorderSpec) : "transparent"
+
+              // Soft accent ring around the selected card — a nested overlay so
+              // it draws on top of the fill but beneath the row content.
+              Rectangle {
+                anchors.fill: parent
+                anchors.margins: Style.space(1)
+                radius: Math.max(2, Style.cornerRadius - Style.space(1))
+                color: "transparent"
+                border.width: 1.5
+                border.color: Util.alpha(Color.accent, delegateRoot.isSelected ? 0.55 : 0)
+                Behavior on border.color { ColorAnimation { duration: 150 } }
+              }
 
               RowLayout {
                 id: delegateRow
@@ -935,8 +1629,8 @@ Panel {
 
                 Item {
                   id: thumbWrap
-                  Layout.preferredWidth: 44
-                  Layout.preferredHeight: 44
+                  Layout.preferredWidth: 52
+                  Layout.preferredHeight: 52
                   Layout.alignment: Qt.AlignTop
                   Layout.topMargin: Style.space(2)
 
@@ -980,27 +1674,32 @@ Panel {
                     Layout.fillWidth: true
                     spacing: Style.space(8)
 
-                    Text {
+                    FitText {
                       text: delegateRoot.name
-                      color: Color.popups.text
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.body
+                      color: delegateRoot.isSelected ? Color.accent : Color.popups.text
+                      baseSize: Style.font.title
+                      minSize: Style.font.caption
                       font.bold: true
                       font.letterSpacing: 0.5
-                      elide: Text.ElideRight
                       Layout.fillWidth: true
+                      // A long name must be allowed to shrink so the row never
+                      // forces itself wider than the card — FitText shrinks the
+                      // font to fit and only elides as a last resort.
+                      Layout.minimumWidth: 0
                     }
 
                     Button {
+                      id: webButton
                       visible: delegateRoot.website !== ""
                       text: String(delegateRoot.website).indexOf("github") !== -1
                         ? "GitHub ↗"
                         : "Web ↗"
-                      foreground: "#a6e3a1"
+                      foreground: root.pacmanColor
                       fontFamily: Style.font.family
                       fontSize: Style.font.caption
                       bordered: true
                       Layout.preferredHeight: Style.space(24)
+                      Layout.minimumWidth: 0
                       onClicked: Qt.openUrlExternally(delegateRoot.website)
                     }
                   }
@@ -1031,7 +1730,7 @@ Panel {
                         text: delegateRoot.description || ""
                         color: Util.alpha(Color.popups.text, 0.62)
                         font.family: Style.font.family
-                        font.pixelSize: Style.font.caption - 1
+                        font.pixelSize: Style.font.body
                         wrapMode: Text.WordWrap
                       }
                     }
@@ -1043,19 +1742,25 @@ Panel {
                     Layout.fillWidth: true
                     Layout.topMargin: Style.space(2)
                     visible: root.detailPoints(delegateRoot).length > 0
+                    // Long license/value text must be allowed to shrink (and
+                    // elide) — otherwise its implicit width forces the whole
+                    // card row wider than the popup and the description wraps
+                    // at the wrong width, clipping mid-word at the card edge.
+                    Layout.minimumWidth: 0
                     // Hard-cap the height so it can never overflow the fixed
                     // card height (in this runtime implicitHeight is computed
                     // pathologically large, which would otherwise blow up the
                     // ColumnLayout, squash the description and push the install
                     // buttons off the bottom of the card).
-                    Layout.preferredHeight: Style.space(32)
-                    Layout.maximumHeight: Style.space(32)
-                    Layout.minimumHeight: Style.space(16)
+                    Layout.preferredHeight: Style.space(44)
+                    Layout.maximumHeight: Style.space(44)
+                    Layout.minimumHeight: Style.space(22)
                     clip: true
-                    color: Util.alpha(Color.popups.text, 0.62)
+                    color: Util.alpha(Color.popups.text, 0.78)
                     font.family: Style.font.family
-                    font.pixelSize: Style.font.caption - 1
-                    lineHeight: Style.space(16)
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    lineHeight: Style.space(20)
                     text: root.detailPoints(delegateRoot).join("\n")
                     wrapMode: Text.NoWrap
                     elide: Text.ElideRight
@@ -1066,6 +1771,22 @@ Panel {
                     Layout.fillWidth: true
                     Layout.topMargin: Style.space(2)
                     spacing: Style.space(8)
+
+                    // "Last updated" date in the bottom-left of the card, away
+                    // from the install buttons on the right. Empty when the row
+                    // has no release/build-date info yet.
+                    Text {
+                      Layout.minimumWidth: 0
+                      Layout.fillWidth: true
+                      Layout.alignment: Qt.AlignVCenter
+                      visible: root.fmtUpdated(delegateRoot.updated) !== ""
+                      text: "Updated: " + root.fmtUpdated(delegateRoot.updated)
+                      color: Util.alpha(Color.popups.text, 0.55)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                      wrapMode: Text.NoWrap
+                    }
 
                     // Flexible spacer pushes the install buttons to the right.
                     Item { Layout.fillWidth: true }
@@ -1079,15 +1800,23 @@ Panel {
                     }
 
                     InstallButton {
-                      visible: root.isPacman && delegateRoot.aurPkg !== ""
-                      installKind: "aur"
+                      visible: (root.isPacman || root.isAur) && delegateRoot.aurPkg !== "" && root.aurHelper === "yay"
+                      installKind: "yay"
                       packageName: delegateRoot.aurPkg
-                      isPending: root.installPending("aur", delegateRoot.aurPkg)
-                      onArmed: root.startInstall("aur", delegateRoot.aurPkg, delegateRoot.name)
+                      isPending: root.installPending("yay", delegateRoot.aurPkg)
+                      onArmed: root.startInstall("yay", delegateRoot.aurPkg, delegateRoot.name)
                     }
 
                     InstallButton {
-                      visible: !root.isPacman && delegateRoot.flatpakPkg !== ""
+                      visible: (root.isPacman || root.isAur) && delegateRoot.aurPkg !== "" && root.aurHelper === "paru"
+                      installKind: "paru"
+                      packageName: delegateRoot.aurPkg
+                      isPending: root.installPending("paru", delegateRoot.aurPkg)
+                      onArmed: root.startInstall("paru", delegateRoot.aurPkg, delegateRoot.name)
+                    }
+
+                    InstallButton {
+                      visible: root.isFlatpak && delegateRoot.flatpakPkg !== ""
                       installKind: "flatpak"
                       packageName: delegateRoot.flatpakPkg
                       isPending: root.installPending("flatpak", delegateRoot.flatpakPkg)
@@ -1115,8 +1844,9 @@ Panel {
 
               Text {
                 text: root.query === ""
-                  ? "Search " + (root.isPacman ? "an Arch package" : "a Flatpak app")
-                  : "No " + (root.isPacman ? "packages" : "apps") + " found"
+                  ? "Search " + (root.isPacman ? "an Arch package"
+                    : root.isFlatpak ? "a Flatpak app" : "an AUR package")
+                  : "No " + (root.isPacman || root.isAur ? "packages" : "apps") + " found"
                 color: Color.popups.text
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
@@ -1158,6 +1888,51 @@ Panel {
   }
 
   //                                                         small install button
+  // Single-line label that shrinks its font to fit whatever width it's given.
+  // A plain Text cannot do this: its implicitWidth stays at the full-text size,
+  // which forces any RowLayout/ColumnLayout it lives in wider than the card
+  // (the root cause of everything running past the popup edge). FitText keeps
+  // its width bounded by the layout (`Layout.minimumWidth: 0` on the caller)
+  // and steps the pixel size down until the text actually fits its allotted
+  // width, falling back to elide below the floor.
+  component FitText: Text {
+    id: ft
+    property real fitWidth: 0  // 0 = use this item's own width
+    property real baseSize: Style.font.caption
+    property real minSize: Style.font.bodySmall
+    property bool fitElide: true
+    property int elideMode: Text.ElideRight
+    // Guard against re-entrancy while stepping the font size.
+    property bool _stepping: false
+
+    font.family: Style.font.family
+    font.pixelSize: ft.baseSize
+    wrapMode: Text.NoWrap
+    verticalAlignment: Text.AlignVCenter
+
+    onFitWidthChanged: if (!ft._stepping) ft.applyFit()
+    onBaseSizeChanged: if (!ft._stepping) ft.applyFit()
+    onWidthChanged: if (ft.fitWidth === 0 && !ft._stepping) ft.applyFit()
+    onTextChanged: if (!ft._stepping) Qt.callLater(ft.applyFit)
+
+    Component.onCompleted: ft.applyFit()
+
+    function applyFit() {
+      if (ft._stepping) return
+      var w = ft.fitWidth > 0 ? ft.fitWidth : ft.width
+      if (w <= 0) return
+      ft._stepping = true
+      var s = ft.baseSize
+      ft.font.pixelSize = s
+      while (s > ft.minSize && implicitWidth > w) {
+        s = Math.max(ft.minSize, s - 0.5)
+        ft.font.pixelSize = s
+      }
+      ft.elide = (ft.fitElide && implicitWidth > w) ? ft.elideMode : Text.ElideNone
+      ft._stepping = false
+    }
+  }
+
   component TabButton: Item {
     id: tabRoot
     property string text: ""
@@ -1175,6 +1950,18 @@ Panel {
         : (tabMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
       border.width: Style.controlBorderWidth(false, tabMouse.containsMouse)
       border.color: Style.controlBorder(false, tabMouse.containsMouse, Color.popups.text, Color.accent)
+
+      // Soft outer glow that fades in on hover (and stays lit while active),
+      // matching the toolbar icon's hover ring.
+Rectangle {
+        anchors.fill: parent
+        radius: Style.cornerRadius
+        color: "transparent"
+        border.color: Util.alpha(Color.accent, 0.6)
+        border.width: 2
+        opacity: tabMouse.containsMouse ? 0.7 : 0
+        Behavior on opacity { NumberAnimation { duration: 180 } }
+      }
 
       Text {
         id: lab
@@ -1197,6 +1984,55 @@ Panel {
   }
 
   //                                                         small install button
+  component HelperPill: Rectangle {
+    id: pill
+    property string label: ""
+    property string glyph: ""
+    property bool selected: false
+    signal clicked()
+
+    implicitHeight: Style.space(24)
+    radius: Style.cornerRadius
+    color: pill.selected
+      ? Style.selectedFillFor(Color.popups.text, Color.accent)
+      : (pillMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
+    border.width: Style.controlBorderWidth(false, pillMouse.containsMouse)
+    border.color: Style.controlBorder(false, pillMouse.containsMouse, Color.popups.text, Color.accent)
+
+    Row {
+      id: pillRow
+      anchors.centerIn: parent
+      spacing: Style.space(4)
+
+      Text {
+        text: pill.glyph
+        visible: pill.glyph !== ""
+        color: pill.selected ? Color.accent : Color.popups.text
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: pill.selected
+      }
+      Text {
+        id: pillLab
+        text: pill.label
+        color: pill.selected ? Color.accent : Color.popups.text
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: pill.selected
+      }
+    }
+
+    implicitWidth: pillRow.implicitWidth + Style.space(14)
+
+    MouseArea {
+      id: pillMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: pill.clicked()
+    }
+  }
+
   component InstallButton: Item {
     id: btn
     property string installKind: ""
@@ -1205,33 +2041,54 @@ Panel {
 
     signal armed()
 
-    implicitWidth: label.implicitWidth + 8
+    // Fixed-width pill: labels self-size and FitText shrinks the font to fit,
+    // so a long AUR package name can never shove the button past the card edge
+    // or inflate the row's minimum width.
+    implicitWidth: Style.space(120)
     implicitHeight: Style.space(26)
 
     function branchColor() {
-      if (installKind === "pacman") return "#a6e3a1"
-      if (installKind === "aur") return "#94e2d5"
-      return "#89b4fa"
+      if (installKind === "pacman") return root.pacmanColor
+      if (installKind === "yay" || installKind === "paru") return root.aurColor
+      return root.flatpakColor
     }
 
     Rectangle {
       anchors.fill: parent
       radius: Style.cornerRadius
       color: btn.isPending
-        ? Util.alpha("#f9e2af", 0.22)
+        ? Util.alpha(root.confirmColor, 0.22)
         : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.2) : Util.alpha(Color.popups.text, 0.06))
       border.width: Style.spacing.hairline
       border.color: btn.isPending
-        ? "#f9e2af"
-        : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.6) : Util.alpha(Color.popups.text, 0.18))
+        ? root.confirmColor
+        : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.8) : Util.alpha(btn.branchColor(), 0.45))
 
-      Text {
+      Behavior on border.color { ColorAnimation { duration: 150 } }
+
+      // Soft outer glow that fades in on hover (and stays lit while armed),
+      // matching the toolbar icon's glow ring.
+      Rectangle {
+        anchors.fill: parent
+        anchors.margins: -Style.space(1)
+        radius: Style.cornerRadius + Style.space(1)
+        color: "transparent"
+        border.color: Util.alpha(btn.branchColor(), 0.5)
+        border.width: 1.5
+        opacity: (btn.isPending || mouse.containsMouse) ? 0.85 : 0
+        Behavior on opacity { NumberAnimation { duration: 180 } }
+      }
+
+      FitText {
         id: label
-        anchors.centerIn: parent
+        anchors.fill: parent
+        anchors.margins: Style.space(4)
         text: btn.isPending ? "Confirm?" : btn.installKind + " (" + btn.packageName + ")"
-        color: btn.isPending ? "#f9e2af" : (mouse.containsMouse ? btn.branchColor() : Color.popups.text)
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        color: btn.isPending ? root.confirmColor : (mouse.containsMouse ? btn.branchColor() : Color.popups.text)
+        baseSize: Style.font.caption
+        minSize: Style.font.bodySmall
+        horizontalAlignment: Text.AlignHCenter
+        elideMode: Text.ElideMiddle
       }
     }
 

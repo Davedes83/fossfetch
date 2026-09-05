@@ -1,0 +1,119 @@
+# Natural-language search keyword -> AppStream category(s), one mapping per
+# line: keyword<TAB>category[,category...]. Shared by appstream_groups.sh and
+# flathub_groups.py. Keywords are matched lower-cased; a query word or short
+# phrase can map to several categories.
+browser	WebBrowser
+web	WebBrowser
+video editing	AudioVideoEditing
+video editor	AudioVideoEditing
+editing	AudioVideoEditing
+editor	AudioVideoEditing,TextEditor
+video	Video
+movie	Video
+audio	Audio
+sound	Audio
+music	Music,Player
+player	Player
+photo	Photography
+photos	Photography
+picture	Photography
+pictures	Photography
+image	Photography
+camera	Photography
+graphic	Graphics
+graphics	Graphics
+draw	Graphics
+paint	Graphics
+chat	Chat
+messaging	Chat,InstantMessaging
+message	Chat
+discord	Chat
+telegram	Chat
+signal	Chat
+terminal	TerminalEmulator
+console	TerminalEmulator
+shell	TerminalEmulator
+code editor	TextEditor,Development
+ide	Development
+development	Development
+programming	Development
+text editor	TextEditor
+text	TextEditor
+office	Office
+document	Office
+documents	Office
+word	Office,WordProcessor
+spreadsheet	Spreadsheet
+spreadsheets	Spreadsheet
+calc	Spreadsheet
+sheets	Spreadsheet
+presentation	Presentation
+slides	Presentation
+finance	Finance
+money	Finance
+banking	Finance
+accounting	Finance
+game	Game
+games	Game
+gaming	Game
+strategy	StrategyGame
+action	ActionGame
+puzzle	LogicGame
+board	BoardGame
+chess	BoardGame
+racing	RacingGame
+sports	SportsGame
+rpg	RolePlaying
+email	Email
+mail	Email
+calendar	Calendar
+file manager	FileManager
+filemanager	FileManager
+archive	Archiving
+archiving	Archiving
+backup	Archiving
+compression	Archiving
+zip	Archiving
+tar	Archiving
+viewer	Viewer
+reader	Viewer
+scan	Scanning
+scanning	Scanning
+scanner	Scanning
+ocr	OCR
+torrent	P2P
+torrents	P2P
+download	FileTransfer
+downloader	FileTransfer
+network	Network
+networking	Network
+security	Security
+password	Security
+password manager	Security
+privacy	Security
+vpn	Security
+science	Science
+math	Science
+chemistry	Science
+physics	Science
+astronomy	Science
+education	Education
+study	Education
+database	Database
+database manager	Database
+monitor	Monitor
+system monitor	Monitor
+monitoring	Monitor
+system	System
+tools	System
+utility	System
+settings	Settings
+preferences	Settings
+config	Settings
+remote	RemoteAccess
+vnc	RemoteAccess
+meeting	VideoConference
+video conference	VideoConference
+maps	Maps
+news	News
+rss	Feed
