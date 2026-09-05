@@ -1077,12 +1077,25 @@ Panel {
     resultsList.positionViewAtIndex(idx, ListView.Center)
   }
 
+  // The primary install action for a row — mirrors the per-branch InstallButton
+  // visibility rules, so Enter arms exactly the button that is shown on the
+  // active tab. Returns null when the row has no installable source.
+  function cardInstallSpec(e) {
+    if (!e) return null
+    if (root.isPacman && e.pacmanPkg && e.pacmanPkg !== "") return { kind: "pacman", pkg: e.pacmanPkg }
+    if ((root.isPacman || root.isAur) && e.aurPkg && e.aurPkg !== "") return { kind: root.aurHelper, pkg: e.aurPkg }
+    if (root.isFlatpak && e.flatpakPkg && e.flatpakPkg !== "") return { kind: "flatpak", pkg: e.flatpakPkg }
+    return null
+  }
+
+  // Enter on the highlighted card arms its install (first press shows the
+  // button's "Confirm?" state); a second press runs the command.
   function activateCursor() {
     if (filteredModel.count === 0) return
     var idx = resultsList.currentIndex
     if (idx < 0 || idx >= filteredModel.count) return
-    var e = filteredModel.get(idx)
-    if (e.website) Qt.openUrlExternally(e.website)
+    var spec = root.cardInstallSpec(filteredModel.get(idx))
+    if (spec) root.startInstall(spec.kind, spec.pkg, filteredModel.get(idx).name)
   }
 
   // Tab cycles through the enabled tabs only (skips ones toggled off).
