@@ -1,3 +1,6 @@
+<img width="1536" height="1024" alt="preview" src="https://github.com/user-attachments/assets/134fe99c-a64b-42a0-a95f-93bf8f301e29" />
+
+
 # FossFetch
 
 A launcher-style package search for [Omarchy](https://omarchy.org/) that hunts on
