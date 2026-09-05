@@ -1704,6 +1704,7 @@ Panel {
                     Button {
                       id: webButton
                       visible: delegateRoot.website !== ""
+                      focusable: false
                       text: String(delegateRoot.website).indexOf("github") !== -1
                         ? "GitHub ↗"
                         : "Web ↗"
