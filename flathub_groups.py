@@ -13,15 +13,58 @@
 # table) to AppStream categories and prints "appid<TAB>name<TAB>summary" per
 # matching app, deduplicated. Prints nothing when the keyword matches no group.
 
-import gzip
 import os
 import re
 import sys
 import time
 import urllib.request
+import zlib
 
-BASE = "https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz"
+BASE = os.environ.get(
+    "FLATHUB_APPSTREAM_URL",
+    "https://dl.flathub.org/repo/appstream/x86_64/appstream.xml.gz",
+)
 STALE_DAYS = 32
+MAX_RAW = int(os.environ.get("FOSSFETCH_MAX_RAW", "67108864"))  # 64 MiB compressed
+MAX_OUT = int(os.environ.get("FOSSFETCH_MAX_OUT", "536870912"))  # 512 MiB decompressed
+
+
+def fetch_bytes(url, cap, timeout=90):
+    """Bounded download: rejects a declared Content-Length over `cap` and
+    aborts once `cap` actual bytes have been read (covers chunked responses)."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        declared = resp.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                if int(declared) > cap:
+                    return None
+            except ValueError:
+                pass
+        data = bytearray()
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > cap:
+                return None
+    return bytes(data)
+
+
+def gunzip_bounded(raw, cap):
+    """Streaming gzip decompression that aborts once `cap` decompressed bytes
+    are produced, so a gzip bomb cannot exhaust memory."""
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        out += d.decompress(raw[i:i + 65536])
+        i += 65536
+        if len(out) > cap:
+            return None
+    if not d.eof or d.unused_data:
+        return None
+    return bytes(out)
 
 
 def script_dir():
@@ -70,15 +113,21 @@ def ensure(root):
         return True
 
     try:
-        with urllib.request.urlopen(BASE, timeout=90) as resp:
-            raw = gzip.decompress(resp.read())
+        raw = fetch_bytes(BASE, MAX_RAW)
+        if raw is None:
+            print("download exceeded size limits", file=sys.stderr)
+            return False
+        data = gunzip_bounded(raw, MAX_OUT)
+        if data is None:
+            print("decompressed data exceeded size limits", file=sys.stderr)
+            return False
     except Exception as e:
         print("download failed: %s" % e, file=sys.stderr)
         return False
 
     index = {}
     for typ in (b"desktop-application", b"desktop"):
-        for m in re.finditer(rb"<component type=\"" + typ + rb"\".*?</component>", raw, re.S):
+        for m in re.finditer(rb"<component type=\"" + typ + rb"\".*?</component>", data, re.S):
             blk = m.group(0)
             appid = re.search(rb"<id>(.*?)</id>", blk)
             if not appid:
@@ -122,6 +171,7 @@ def ensure(root):
             fh.write("%s\t%s\n" % (aid, released))
     os.replace(appid_target + ".tmp", appid_target)
     print("built flathub groups: %d categories, %d apps" % (len(index), sum(len(v) for v in index.values())), file=sys.stderr)
+    return True
 
 
 def resolve(root, keyword):

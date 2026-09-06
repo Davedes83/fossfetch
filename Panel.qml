@@ -176,14 +176,30 @@ Panel {
     return "Search AUR package… (spotify, google-chrome, vscode-bin)"
   }
 
+  // Only plain http(s) links may be handed to the external browser. AUR,
+  // pacman and Flatpak metadata may contain arbitrary URLs, so everything is
+  // allowlisted before opening.
+  function isSafeWebUrl(u) {
+    var s = String(u || "").toLowerCase()
+    return s.indexOf("https://") === 0 || s.indexOf("http://") === 0
+  }
+
   function resolveThumb(remote, iconName) {
     if (remote !== "") {
       // Bare local paths (e.g. AppStream-catalog or icon-theme hits) must be
       // wrapped in a file:// URL — Image.source won't load a raw path,
-      // matching how omarchy's own iconSource() resolves local files.
+      // matching how omarchy's own iconSource() resolves local files. Only
+      // files under the plugin's verified catalog cache are accepted; remote
+      // metadata must resolve to an http(s) URL, never an arbitrary file path.
       var s = String(remote)
-      if (s.indexOf("file://") === 0 || s.indexOf("https://") === 0 || s.indexOf("http://") === 0) return s
-      return Util.fileUrl(s)
+      if (s.indexOf("https://") === 0 || s.indexOf("http://") === 0) return s
+      if (s.indexOf("file://") === 0) {
+        var p = s.substring(7)
+        if (p.indexOf(root.iconCacheDir) === 0) return s
+        return ""
+      }
+      if (s.indexOf(root.iconCacheDir) === 0) return Util.fileUrl(s)
+      return ""
     }
     var local = iconName !== "" ? Quickshell.iconPath(iconName, true) : ""
     return local !== "" ? local : ""
@@ -1662,6 +1678,7 @@ Panel {
                     font.family: Style.font.family
                     font.pixelSize: Style.font.icon
                     font.bold: true
+                    textFormat: Text.PlainText
                     visible: img.status !== Image.Ready
                   }
 
@@ -1714,7 +1731,7 @@ Panel {
                       bordered: true
                       Layout.preferredHeight: Style.space(24)
                       Layout.minimumWidth: 0
-                      onClicked: Qt.openUrlExternally(delegateRoot.website)
+                      onClicked: { if (root.isSafeWebUrl(delegateRoot.website)) Qt.openUrlExternally(delegateRoot.website) }
                     }
                   }
 
@@ -1745,6 +1762,7 @@ Panel {
                         color: Util.alpha(Color.popups.text, 0.62)
                         font.family: Style.font.family
                         font.pixelSize: Style.font.body
+                        textFormat: Text.PlainText
                         wrapMode: Text.WordWrap
                       }
                     }
@@ -1776,6 +1794,7 @@ Panel {
                     font.bold: true
                     lineHeight: Style.space(20)
                     text: root.detailPoints(delegateRoot).join("\n")
+                    textFormat: Text.PlainText
                     wrapMode: Text.NoWrap
                     elide: Text.ElideRight
                   }
@@ -1798,6 +1817,7 @@ Panel {
                       color: Util.alpha(Color.popups.text, 0.55)
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
+                      textFormat: Text.PlainText
                       elide: Text.ElideRight
                       wrapMode: Text.NoWrap
                     }
@@ -1865,6 +1885,7 @@ Panel {
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
                 font.bold: true
+                textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
               }
 
@@ -1875,6 +1896,7 @@ Panel {
                 color: Util.alpha(Color.popups.text, 0.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
+                textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
               }
             }
@@ -1918,6 +1940,10 @@ Panel {
     property int elideMode: Text.ElideRight
     // Guard against re-entrancy while stepping the font size.
     property bool _stepping: false
+
+    // Sinks render repository/package metadata (names, AUR fields, install
+    // labels) — always literal, never rich-text HTML from remote sources.
+    textFormat: Text.PlainText
 
     font.family: Style.font.family
     font.pixelSize: ft.baseSize
@@ -1985,6 +2011,7 @@ Rectangle {
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: active
+        textFormat: Text.PlainText
       }
     }
 
@@ -2025,6 +2052,7 @@ Rectangle {
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: pill.selected
+        textFormat: Text.PlainText
       }
       Text {
         id: pillLab
@@ -2033,6 +2061,7 @@ Rectangle {
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: pill.selected
+        textFormat: Text.PlainText
       }
     }
 

@@ -15,18 +15,42 @@
 # Pure data on stdout (nothing else); always exits 0 so the panel's
 # StdioCollector gets a clean stream. Network errors yield an empty result set.
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
 
 QUERY_COLUMNS = 8
+MAX_BYTES = int(os.environ.get("FOSSFETCH_MAX_AUR", "8388608"))  # 8 MiB cap
 
 
 def fetch(query):
-    url = "https://aur.archlinux.org/rpc/?v=5&type=search&arg=" + urllib.parse.quote(query)
+    url = os.environ.get("AUR_RPC_URL", "https://aur.archlinux.org/rpc/")
+    separator = "&" if "?" in url else "?"
+    url += separator + "v=5&type=search&arg=" + urllib.parse.quote(query)
     req = urllib.request.Request(url, headers={"User-Agent": "fossfetch-grouping/1.0"})
+    # Bounded read: reject a declared Content-Length over the cap and abort once
+    # `cap` actual bytes have been read (covers chunked responses).
     with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.load(resp)
+        declared = resp.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                if int(declared) > MAX_BYTES:
+                    return None
+            except ValueError:
+                pass
+        data = bytearray()
+        while True:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > MAX_BYTES:
+                return None
+    try:
+        return json.loads(bytes(data).decode("utf-8", "replace"))
+    except ValueError:
+        return None
 
 
 def cleanup(value):
@@ -40,6 +64,9 @@ def main():
     try:
         data = fetch(query)
     except Exception:
+        return
+    if not data:
+        # Oversized / unparseable response: emit nothing (clean empty result).
         return
     results = data.get("results") or []
     for p in results:
