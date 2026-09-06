@@ -1,4 +1,4 @@
-<img width="1536" height="1024" alt="preview" src="https://github.com/user-attachments/assets/134fe99c-a64b-42a0-a95f-93bf8f301e29" />
+<img width="1024" height="1536" alt="preview" src="https://github.com/user-attachments/assets/51fffdce-fb8f-4d90-bd1b-f076dda6e3e3" />
 
 
 # FossFetch
