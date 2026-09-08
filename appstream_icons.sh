@@ -1,32 +1,55 @@
 #!/bin/bash
-# Resolve icons for Arch repo packages from the AppStream catalog that Arch
-# publishes at sources.archlinux.org. Usage:
+# Resolve icons for Arch repo packages from the AppStream catalog. Usage:
 #   appstream_icons.sh ensure <cacheRoot>
 #   appstream_icons.sh resolve <cacheRoot> <pkg> [<pkg> ...]
 #
-# `ensure` downloads the icons-48x48.tar.gz tarball for each repo at the newest
-# *verified* catalog release, extracts it into <cacheRoot>/catalog/<date>/<repo>/,
-# and records the date. ~2.7MB once; refreshed only when the catalog is stale.
+# `ensure` builds <cacheRoot>/catalog/<version>/<repo>/png/ from one of two
+# trust anchors, in order:
 #
-# `resolve` looks up each pkg's icon by its "<pkg>_<appid>.png" prefix, which is
-# how the catalog names every entry — no XML needed. Emits "I|<pkg>|<path>" per
-# arg (empty path when the pkg ships no icon in the catalog).
+#   1. LOCAL (preferred): the distribution's already verified AppStream data
+#      installed by pacman as `archlinux-appstream-data`
+#      (/usr/share/swcatalog/icons/archlinux-arch-<repo>/48x48). These files
+#      are authenticated by the Arch package manager's keyring; nothing is
+#      downloaded. The catalog is versioned by `pacman -Q` output and refreshes
+#      automatically when the package is updated.
 #
-# Security: the artifact version is taken from the official Arch GitLab
-# PKGBUILD for archlinux-appstream-data (a trusted, signed package) and every
-# downloaded tarball is verified against that PKGBUILD's published sha256sum
-# BEFORE any extraction. Downloads are capped (Content-Length and actual
-# reads), decompression is bounded, and tar members are validated against
-# absolute / ".." traversal / symlink / hardlink entries plus per-file,
-# total-size and member count quotas. Extraction happens in a private temp dir
-# and is swapped into place atomically. Overridable (defaults are hardened):
-#   ARCH_BASE, ARCH_PKGBUILD_URL, FOSSFETCH_MAX_RAW, FOSSFETCH_MAX_ICON,
-#   FOSSFETCH_MAX_ICON_TOTAL, FOSSFETCH_MAX_ICON_COUNT
+#   2. NETWORK (fallback): the immutable catalog release pinned in
+#      appstream_pins.sh (FOSSFETCH_PINNED_VER + FOSSFETCH_PINNED_SUMS). Each
+#      icons-48x48.tar.gz is fetched from sources.archlinux.org and verified
+#      against its pinned sha256 BEFORE any extraction. The pin is committed to
+#      and reviewed together with this source; it is never obtained or derived
+#      from a remote at runtime, and a mismatch is an unauthorized change that
+#      is refused, not parsed.
+#
+# Downloads are capped (Content-Length and actual reads), decompression is
+# bounded by per-member/aggregate/count tar validation (a gzip bomb is never
+# buffered), and members are checked against absolute / ".." / symlink /
+# hardlink entries. Extraction happens in a private temp dir and is swapped
+# into place atomically. Overridable (defaults are hardened):
+#   ARCH_BASE, FOSSFETCH_SWCATALOG, FOSSFETCH_PINNED_VER, FOSSFETCH_PINNED_SUMS,
+#   FOSSFETCH_MAX_RAW, FOSSFETCH_MAX_ICON, FOSSFETCH_MAX_ICON_TOTAL,
+#   FOSSFETCH_MAX_ICON_COUNT
+#
+# `resolve` emits "I|<pkg>|<path>" per arg (empty path when no icon).
 
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=appstream_pins.sh
+. "$SCRIPT_DIR/appstream_pins.sh"
+
+# Network pin: use the reviewed constants unless a maintainer/test explicitly
+# overrides them (shipping defaults remain immutable).
+PINNED_VER="${FOSSFETCH_PINNED_VER:-$PINNED_PKGVER}"
+if [ -n "${FOSSFETCH_PINNED_SUMS:-}" ]; then
+  read -r -a SRC_PINS <<< "$FOSSFETCH_PINNED_SUMS"
+else
+  SRC_PINS=("${PINNED_SHA256SUMS[@]}")
+fi
+export FOSSFETCH_PINNED_SUMS="${SRC_PINS[*]}"
+
 BASE="${ARCH_BASE:-https://sources.archlinux.org/other/packages/archlinux-appstream-data}"
-PKGBUILD_URL="${ARCH_PKGBUILD_URL:-https://gitlab.archlinux.org/archlinux/packaging/packages/archlinux-appstream-data/-/raw/main/PKGBUILD}"
+SWCATALOG="${FOSSFETCH_SWCATALOG:-/usr/share/swcatalog}"
 REPOS="core extra multilib"
 SIZE="48x48"
 STALE_DAYS=32
@@ -36,64 +59,65 @@ cache="${2:-$HOME/.cache/fossfetch}"
 STORE="$cache/catalog"
 mkdir -p "$STORE"
 
-# Newest *verified* pkgver of archlinux-appstream-data, read from the official
-# Arch GitLab PKGBUILD (bounded fetch). Empty on any failure.
-pkgver_of() {
-  python3 - "$PKGBUILD_URL" <<'PY'
-import re
-import sys
-import urllib.request
+# The tied (config, pacman-installed) local source of truth, used when the
+# archlinux-appstream-data package is present.
+local_available() {
+  [ -d "$SWCATALOG/icons" ] && [ -d "$SWCATALOG/xml" ] || return 1
+  if [ -n "${FOSSFETCH_SWCATALOG:-}" ]; then return 0; fi # explicit test/sealed path
+  command -v pacman >/dev/null 2>&1 || return 1
+  pacman -Q archlinux-appstream-data >/dev/null 2>&1
+}
 
-url = sys.argv[1]
-cap = 262144
-try:
-    with urllib.request.urlopen(url, timeout=20) as r:
-        declared = r.headers.get("Content-Length")
-        if declared is not None:
-            try:
-                if int(declared) > cap:
-                    sys.exit(2)
-            except ValueError:
-                pass
-        data = bytearray()
-        while True:
-            chunk = r.read(65536)
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > cap:
-                sys.exit(2)
-except Exception:
-    sys.exit(2)
-m = re.search(rb"^pkgver=([0-9]+)$", data, re.M)
-sys.stdout.write(m.group(1).decode() if m else "")
-PY
+local_version() {
+  if [ -n "${FOSSFETCH_SWCATALOG_VER:-}" ]; then
+    echo "$FOSSFETCH_SWCATALOG_VER"
+  else
+    pacman -Q archlinux-appstream-data 2>/dev/null | awk '{print $2}'
+  fi
+}
+
+expected_version() {
+  if local_available; then local_version; else echo "$PINNED_VER"; fi
 }
 
 ensure_catalog() {
   marker="$STORE/current"
+  want=$(expected_version) || want="$PINNED_VER"
 
-  # Fresh enough? Skip the network round-trip.
-  if [ -f "$marker" ]; then
-    mtime=$(date -d "$(cat "$marker")" +%s 2>/dev/null || echo "")
-    if [ -n "$mtime" ] && [ -d "$STORE/$(cat "$marker")" ]; then
+  # Fresh + same version + tree present? Skip the build.
+  if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$want" ] && [ -d "$STORE/$want" ]; then
+    mtime=$(stat -c %Y "$marker" 2>/dev/null || echo 0)
+    if [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
       now=$(date +%s)
       age=$(( (now - mtime) / 86400 ))
       [ "$age" -lt "$STALE_DAYS" ] && return 0
     fi
   fi
 
-  ver=$(pkgver_of)
-  case "$ver" in
-    ''|*[!0-9]*) echo "could not resolve a verified appstream catalog version" >&2; return 1 ;;
-  esac
+  target="$STORE/$want"
+  tmpdir=$(mktemp -d "$STORE/.tmp.XXXXXX") || { echo "mktemp failed" >&2; return 1; }
 
-  target="$STORE/$ver"
-  if [ ! -d "$target" ]; then
-    tmpdir=$(mktemp -d "$STORE/.tmp.XXXXXX") || { echo "mktemp failed" >&2; return 1; }
-    export ARCH_BASE PKGBUILD_URL
-    if ! python3 - "$BASE" "$PKGBUILD_URL" "$ver" "$SIZE" "$REPOS" "$tmpdir" <<'PY'
-import gzip
+  if local_available && [ "$want" = "$(local_version)" ]; then
+    # Pacman-verified local data: copy (dereferenced) so the cache holds only
+    # regular PNG files; rebuilds whenever `pacman -Q` version changes.
+    for repo in core extra multilib; do
+      src="$SWCATALOG/icons/archlinux-arch-$repo/$SIZE"
+      if [ ! -d "$src" ]; then
+        echo "local appstream icons missing: $src" >&2
+        rm -rf "$tmpdir"
+        return 1
+      fi
+      mkdir -p "$tmpdir/$repo"
+      if ! cp -aL "$src"/. "$tmpdir/$repo"/ 2>/dev/null; then
+        echo "failed to copy local appstream icons from $src" >&2
+        rm -rf "$tmpdir"
+        return 1
+      fi
+    done
+  else
+    # Network fallback: pinned (immutable) release, checksum-verified before use.
+    export ARCH_BASE
+    if ! python3 - "$BASE" "$want" "$SIZE" "$REPOS" "$tmpdir" <<'PY'
 import hashlib
 import io
 import os
@@ -102,13 +126,16 @@ import sys
 import tarfile
 import urllib.request
 
-BASE, PKGBUILD_URL, ver, size, repos, tmpdir = sys.argv[1:7]
+BASE, ver, size, repos, tmpdir = sys.argv[1:6]
 
 MAX_RAW    = int(os.environ.get("FOSSFETCH_MAX_RAW", "67108864"))        # 64 MiB / archive
 MAX_MEMBER = int(os.environ.get("FOSSFETCH_MAX_ICON", "1048576"))        # 1 MiB / icon
 MAX_TOTAL  = int(os.environ.get("FOSSFETCH_MAX_ICON_TOTAL", "134217728"))
 MAX_COUNT  = int(os.environ.get("FOSSFETCH_MAX_ICON_COUNT", "20000"))
-MAX_PB     = 262144
+
+sums = os.environ.get("FOSSFETCH_PINNED_SUMS", "").split()
+if len(sums) != 12:
+    sys.exit(2)
 
 
 def fetch(url, cap):
@@ -134,48 +161,29 @@ def fetch(url, cap):
     return bytes(data)
 
 
-def pkgbuild_checksums(text, want_ver):
-    m = re.search(r"^pkgver=([0-9]+)$", text, re.M)
-    if not m or m.group(1) != want_ver:
-        return None
-    block = re.search(r"sha256sums=\((.*?)\)", text, re.S)
-    if not block:
-        return None
-    sums = re.findall(r"['\"`]?([0-9a-fA-F]{64})['\"`]?", block.group(1))
-    if len(sums) != 12:
-        return None
-    return [s.lower() for s in sums]
-
-
-# The raw (compressed) archive is already bounded to MAX_RAW by `fetch`, and
-# the *decompressed* quota is enforced below through member validation: every
-# tar member's declared size is checked (per-file + aggregate) and its body is
-# only read after that check passes, so a gzip bomb is never buffered or
-# written. Member count is capped too.
 REPO_ORDER = ["core", "extra", "multilib"]
-# sha256sums() in the PKGBUILD lists per repo: xml, icons-48x48, icons-64x64,
-# icons-128x128 — slot index = repo_index * 4 + 1 for icons-48x48.
+# sha256sums() slot per repo: 0 = xml, 1 = icons-48x48, 2 = 64x64, 3 = 128x128.
 SLOT_48 = 1
 SAFE_RE = re.compile(r"[A-Za-z0-9_.+~-]+\.png\Z")
 
-pb = fetch(PKGBUILD_URL, MAX_PB)
-if pb is None:
-    sys.exit(2)
-sums = pkgbuild_checksums(pb.decode("utf-8", "replace"), ver)
-if sums is None:
-    sys.exit(3)
-
+# The raw (compressed) archive is already bounded to MAX_RAW by `fetch`, and
+# the *decompressed* quota is enforced through member validation: every tar
+# member's declared size is checked (per-file + aggregate) and its body is only
+# read after that check passes, so a gzip bomb is never buffered or written.
+# Member count is capped too.
 total = 0
 count = 0
 for repo in repos.split():
     if repo not in REPO_ORDER:
-        sys.exit(4)
+        sys.exit(3)
     slot = REPO_ORDER.index(repo) * 4 + SLOT_48
     raw = fetch("%s/%s/%s/icons-%s.tar.gz" % (BASE, ver, repo, size), MAX_RAW)
     if raw is None:
-        sys.exit(5)
+        sys.exit(4)
+    # Verify against the immutable, reviewed pin BEFORE any extraction. This is
+    # the trust anchor: the pin is committed source, never a runtime fetch.
     if hashlib.sha256(raw).hexdigest() != sums[slot]:
-        sys.exit(6)  # checksum mismatch -> never extract unverified data
+        sys.exit(5)  # unauthorized/checksum-mismatched archive -> refused
 
     outdir = os.path.join(tmpdir, repo)
     os.makedirs(outdir, mode=0o755, exist_ok=True)
@@ -184,24 +192,24 @@ for repo in repos.split():
             for member in tf:
                 name = member.name or ""
                 if name.startswith("/"):
-                    sys.exit(7)  # absolute path
+                    sys.exit(6)  # absolute path
                 parts = name.split("/")
                 if any(p in ("", ".", "..") for p in parts):
-                    sys.exit(8)  # traversal / empty component
+                    sys.exit(7)  # traversal / empty component
                 if member.isdir() and not member.issym():
                     continue
                 if not member.isfile() or member.issym() or member.islnk():
-                    sys.exit(9)  # symlinks/hardlinks/device/fifo rejected
+                    sys.exit(8)  # symlinks/hardlinks/device/fifo rejected
                 if not name.lower().endswith(".png") or not SAFE_RE.match(name):
-                    sys.exit(10)  # only plain basename .png icons
+                    sys.exit(9)  # only plain basename .png icons
                 if member.size > MAX_MEMBER or total + member.size > MAX_TOTAL:
-                    sys.exit(11)  # decompressed-bytes cap (per-file + total)
+                    sys.exit(10)  # decompressed-bytes cap (per-file + total)
                 count += 1
                 if count > MAX_COUNT:
-                    sys.exit(12)
+                    sys.exit(11)
                 src = tf.extractfile(member)
                 if src is None:
-                    sys.exit(13)
+                    sys.exit(12)
                 dst = os.path.join(outdir, os.path.basename(name))
                 with open(dst, "wb") as out:
                     while True:
@@ -210,24 +218,34 @@ for repo in repos.split():
                             break
                         out.write(chunk)
                 total += member.size
-    except (tarfile.TarError, gzip.BadGzipFile, EOFError, OSError, ValueError):
-        sys.exit(14)
+    except (tarfile.TarError, EOFError, OSError, ValueError):
+        sys.exit(13)
 
 sys.exit(0)
 PY
     then
       rm -rf "$tmpdir"
       rm -rf "$STORE"/.tmp.* "$STORE"/*.old 2>/dev/null || true
-      echo "appstream icon catalog fetch/verify failed (version $ver)" >&2
+      echo "appstream icon catalog fetch/verify failed (version $want)" >&2
       return 1
     fi
-    # Atomic swap: keep the previous good tree until the new one is in place.
-    if [ -d "$target" ]; then mv "$target" "$tmpdir.old" 2>/dev/null || rm -rf "$target"; fi
-    mv "$tmpdir" "$target" || { rm -rf "$tmpdir"; return 1; }
-    rm -rf "$tmpdir.old" 2>/dev/null || true
   fi
 
-  echo "$ver" > "$marker"
+  # Prune older catalog versions only after a successful swap, so a failed
+  # build never destroys the last good catalog.
+  for old in "$STORE"/*; do
+    case "$old" in
+      "$target") ;;
+      "$STORE"/.tmp.*|"$STORE"/*.old) ;;
+      *) [ -d "$old" ] && rm -rf "$old" ;;
+    esac
+  done
+
+  if [ -d "$target" ]; then mv "$target" "$tmpdir.old" 2>/dev/null || rm -rf "$target"; fi
+  mv "$tmpdir" "$target" || { rm -rf "$tmpdir"; return 1; }
+  rm -rf "$tmpdir.old" 2>/dev/null || true
+
+  echo "$want" > "$marker"
   return 0
 }
 

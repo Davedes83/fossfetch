@@ -94,7 +94,10 @@ All options persist to
 - Optional / feature-gated:
   - `flatpak` — for the Flatpak tab and Flatpak installs
   - `yay` or `paru` — for AUR installs
-  - a network connection for the first category/icon catalog download
+  - _optional_ `archlinux-appstream-data` — if installed, FossFetch reads the
+    Arch AppStream catalog from the pacman-verified `/usr/share/swcatalog`
+    files (no downloads, auto-refreshes with your system updates);
+  - otherwise a network connection for the first category/icon catalog download
     (cached locally; see [Caches](#caches-and-privacy))
 
 ---
@@ -189,13 +192,21 @@ Options chosen in the panel are persisted to
 ## Caches and privacy
 
 - Datastore indices live under `~/.cache/fossfetch/`:
-  - `catalog/<date>/groups.tsv` + icons — built from Arch's published AppStream
+  - `catalog/<version>/groups.tsv` + icons — built from the Arch AppStream
     catalog and refreshed when it is over 32 days old;
   - `flathub/groups.tsv` + `flathub/appids.tsv` — built from Flathub's
     AppStream catalog (same staleness window).
 - Everything is resolved against public, first-party sources (Arch's AppStream
   mirror, Flathub's AppStream feed, the AUR RPC). No accounts, no telemetry, no
   third-party trackers.
+- **Arch catalog trust model.** Use pacman-verified local data when
+  `archlinux-appstream-data` is installed. Otherwise FossFetch downloads only
+  the catalog release pin encoded in `appstream_pins.sh` — an immutable,
+  reviewed sha256 checksum set that is committed to the plugin source and never
+  fetched or derived from a remote at runtime. Every download is verified
+  against that pin before it is extracted or parsed; a mismatch is treated as
+  an unauthorized change and refused. Downloads and decompression are capped,
+  and tar members are validated (no traversal, links, or size/count overflow).
 - Search results and enriched metadata are always fetched live; remove the
   cache directory at any time and it will be rebuilt on the next search.
 
@@ -211,6 +222,7 @@ Options chosen in the panel are persisted to
 | `flathub_groups.py` | Flathub AppStream category matcher + release-date index |
 | `appstream_groups.sh` | Arch AppStream category matcher (`groups.tsv`) |
 | `appstream_icons.sh` | Arch AppStream icon catalog resolution |
+| `appstream_pins.sh` | Immutable, reviewed pin for the Arch AppStream catalog (version + sha256 set) |
 | `flatpak_icon.py` | Name → Flathub app-id resolution for icons |
 | `groups.keywords` | Natural-language keyword → AppStream category table |
 | `alternatives.json` | Bundled curated metadata of FOSS alternatives to
