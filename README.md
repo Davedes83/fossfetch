@@ -1,3 +1,4 @@
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/O3N726LJT4)
 <img width="1024" height="1536" alt="preview" src="https://github.com/user-attachments/assets/51fffdce-fb8f-4d90-bd1b-f076dda6e3e3" />
 
 
