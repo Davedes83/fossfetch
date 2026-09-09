@@ -1460,36 +1460,26 @@ Panel {
               }
             }
 
-            // Buy Me a Coffee — same button used in the mouse & keybind app.
+            // Buy Me a Coffee — ko-fi flavored; same button used in the mouse & keybind app.
             BorderSurface {
               id: buyButton
               visible: root.showCoffeeButton
               x: (parent.width - width) / 2
-              implicitWidth: buyRow.implicitWidth + Style.space(16)
-              implicitHeight: Style.space(22)
+              implicitWidth: koFiImg.sourceSize.width + Style.space(10)
+              implicitHeight: koFiImg.sourceSize.height + Style.space(6)
               radius: Style.cornerRadius
-              color: buyHover.hovered ? Util.alpha("#FF813F", 0.22) : Util.alpha("#FF813F", 0.10)
-              borderSpec: Border.controlSpec(buyHover.hovered ? "hover-cursor" : "normal", Color.popups.text, Color.popups.text)
+              color: "transparent"
               Behavior on color { ColorAnimation { duration: 150 } }
 
-              RowLayout {
-                id: buyRow
+              Image {
+                id: koFiImg
                 anchors.centerIn: parent
-                spacing: Style.space(3)
-
-                Text {
-                  text: "☕"
-                  color: "#FF813F"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.space(13)
-                }
-                Text {
-                  text: "Buy Me a Coffee"
-                  color: buyHover.hovered ? "#FFB347" : "#FF813F"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption - 1
-                  font.bold: true
-                }
+                source: "https://storage.ko-fi.com/cdn/kofi5.png?v=6"
+                sourceSize.width: 138
+                sourceSize.height: 30
+                fillMode: Image.PreserveAspectFit
+                mipmap: true
+                smooth: true
               }
 
               MouseArea {
@@ -1497,7 +1487,7 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: Qt.openUrlExternally("https://www.paypal.com/paypalme/DavidDesousa13")
+                onClicked: Qt.openUrlExternally("https://ko-fi.com/davedes")
               }
             }
 
@@ -1570,6 +1560,8 @@ Panel {
 
               Keys.onDownPressed: root.moveCursor(0, 1)
               Keys.onUpPressed: root.moveCursor(0, -1)
+              Keys.onLeftPressed: root.switchPanel(-1)
+              Keys.onRightPressed: root.switchPanel(1)
               Keys.onReturnPressed: root.activateCursor()
             }
           }
