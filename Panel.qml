@@ -117,7 +117,6 @@ Panel {
     stdinEnabled: true
     property string pending: ""
     onStarted: if (optionsWriter.pending !== "") optionsWriter.write(optionsWriter.pending)
-    onFinished: optionsWriter.pending = ""
   }
 
   function setPanelDesign(d) {
