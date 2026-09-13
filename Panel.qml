@@ -106,6 +106,20 @@ Panel {
   // bar restyles itself live.
   property string panelDesign: "current"
 
+  readonly property string appstreamStateScript: Qt.resolvedUrl("./appstream_state.py").toString().replace("file://", "")
+  readonly property string optionsFilePath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
+
+  // Hardened options write: pushes the JSON to appstream_state.py write-options,
+  // which verifies ownership + no-follow for the whole path and swaps atomically.
+  Process {
+    id: optionsWriter
+    running: false
+    stdinEnabled: true
+    property string pending: ""
+    onStarted: if (optionsWriter.pending !== "") optionsWriter.write(optionsWriter.pending)
+    onFinished: optionsWriter.pending = ""
+  }
+
   function setPanelDesign(d) {
     var valid = ["current", "outline", "soft", "bold", "minimal", "icon"]
     if (valid.indexOf(d) === -1) return
@@ -116,18 +130,23 @@ Panel {
   }
 
   function persistOptions() {
-    optionsFile.setText(JSON.stringify({
+    // Persisted through appstream_state.py's owner-checked, no-follow dirfd
+    // transaction (never through an unchecked HOME path).
+    optionsWriter.pending = JSON.stringify({
       flatpak: root.flatpakEnabled,
       aur: root.aurEnabled,
       aurHelper: root.aurHelper,
       design: root.panelDesign,
       showCoffee: root.showCoffeeButton
-    }, null, 2) + "\n")
+    }, null, 2) + "\n"
+    optionsWriter.command = ["python3", root.appstreamStateScript, "write-options", root.optionsFilePath]
+    optionsWriter.running = false
+    optionsWriter.running = true
   }
 
   FileView {
     id: optionsFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
+    path: root.optionsFilePath
     watchChanges: false
     printErrors: false
     onLoaded: {

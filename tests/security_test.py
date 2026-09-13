@@ -30,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
 ICONS = os.path.join(PLUGIN, "appstream_icons.sh")
 GROUPS = os.path.join(PLUGIN, "appstream_groups.sh")
+STATE = os.path.join(PLUGIN, "appstream_state.py")
 FLATHUB = os.path.join(PLUGIN, "flathub_groups.py")
 AUR = os.path.join(PLUGIN, "aur_search.py")
 PANEL = os.path.join(PLUGIN, "Panel.qml")
@@ -166,7 +167,10 @@ def make_gzip_bomb(kb=1024):
 class FossFetchTests(unittest.TestCase):
     def setUp(self):
         self.srv = FixtureServer()
-        self.root = tempfile.mkdtemp(prefix="fossfetch-test-")
+        # Scratch dir under the real home (owner-checked chain) — the hardened
+        # cache helper refuses to descend through shared/writable dirs like /tmp.
+        self.root = tempfile.mkdtemp(prefix="fossfetch-test-",
+                                     dir=os.path.expanduser("~"))
 
     def tearDown(self):
         self.srv.close()
@@ -387,6 +391,52 @@ class FossFetchTests(unittest.TestCase):
             self.assertIn("Audio\torg.example.App", fh.read())
         self.assertEqual(self.srv.requests, [],
                          "local source must not hit the network at all")
+
+    # ---------------------------------------------- hardened state transactions
+    def test_symlinked_cache_root_refused(self):
+        # An attacker-preplanted symlink in the cache chain must be refused and
+        # never followed into a write or recursive delete.
+        victim = os.path.join(self.root, "victim")
+        os.makedirs(victim)
+        sentinel = os.path.join(victim, "sentinel.txt")
+        with open(sentinel, "w") as fh:
+            fh.write("do not delete")
+        cache = os.path.join(self.root, "cache")
+        os.symlink(victim, cache)
+        probes = [
+            ["python3", STATE, "ensure", cache],
+            ["python3", STATE, "tmpdir", cache],
+            ["python3", STATE, "prune", cache, "x"],
+        ]
+        for cmd in probes:
+            p = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=60, env=self.env())
+            self.assertNotEqual(p.returncode, 0, cmd)
+        # The symlink in the chain is refused: nothing may be created inside
+        # the victim directory via the cache path.
+        self.assertFalse(os.path.exists(os.path.join(victim, "catalog")))
+
+    def test_options_write_is_atomic_and_no_follow(self):
+        path = os.path.join(self.root, ".local/state/omarchy/settings",
+                            "davedes.fossfetch.json")
+        os.makedirs(os.path.dirname(path))
+        # Pre-plant a symlink at the destination: writes must replace the entry,
+        # never write through the link.
+        target = os.path.join(self.root, "hostage.json")
+        with open(target, "w") as fh:
+            fh.write("hostage")
+        os.symlink(target, path)
+        p = subprocess.run(
+            ["python3", STATE, "write-options", path],
+            input='{"showCoffee": false}\n', capture_output=True, text=True,
+            timeout=60, env=self.env())
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(os.path.islink(path),
+                         "symlink destination must be replaced, not followed")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual('{"showCoffee": false}\n', fh.read())
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual("hostage", fh.read())
 
     # ------------------------------------------------------------ QML static
     def test_qml_hardening(self):

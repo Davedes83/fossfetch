@@ -30,6 +30,10 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=appstream_pins.sh
 . "$SCRIPT_DIR/appstream_pins.sh"
+STATE_PY="$SCRIPT_DIR/appstream_state.py"
+
+# State/cache writes go through the owner-checked, no-follow dirfd helper
+# (appstream_state.py), like the icon catalog.
 
 PINNED_VER="${FOSSFETCH_PINNED_VER:-$PINNED_PKGVER}"
 if [ -n "${FOSSFETCH_PINNED_SUMS:-}" ]; then
@@ -96,11 +100,11 @@ ensure_groups() {
     return 1
   fi
 
-  tmp="$target.tmp"
-  : > "$tmp"
+  tmprel=$(python3 "$STATE_PY" tmpfile "$cache" "$date_dir" "__groups.tmp") || { echo "cannot create group index temp" >&2; return 1; }
+  tmp="$STORE/$tmprel"
   for repo in $REPOS; do
     if [ "$src_mode" = "local" ]; then
-      [ -f "$SWCATALOG/xml/$repo.xml.gz" ] || { rm -f "$tmp"; echo "local appstream xml missing: $SWCATALOG/xml/$repo.xml.gz" >&2; return 1; }
+      [ -f "$SWCATALOG/xml/$repo.xml.gz" ] || { python3 "$STATE_PY" rmtree "$cache" "$tmprel" >/dev/null 2>&1 || true; echo "local appstream xml missing: $SWCATALOG/xml/$repo.xml.gz" >&2; return 1; }
     fi
     if ! python3 - "$src_mode" "$BASE" "$date_dir" "$repo" "$SWCATALOG" >> "$tmp" <<'PY'
 import hashlib
@@ -203,13 +207,17 @@ parse(xml)
 sys.exit(0)
 PY
     then
-      rm -f "$tmp"
+      python3 "$STATE_PY" rmtree "$cache" "$tmprel" >/dev/null 2>&1 || true
       echo "group index build failed for $repo" >&2
       return 1
     fi
   done
   sort -u "$tmp" -o "$tmp"
-  mv "$tmp" "$target"
+  python3 "$STATE_PY" swap "$cache" "$tmprel" "$date_dir/groups.tsv" || {
+    python3 "$STATE_PY" rmtree "$cache" "$tmprel" >/dev/null 2>&1 || true
+    echo "group index swap failed" >&2
+    return 1
+  }
   echo "built groups index: $(wc -l < "$target") entries" >&2
 }
 

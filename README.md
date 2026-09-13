@@ -223,6 +223,7 @@ Options chosen in the panel are persisted to
 | `appstream_groups.sh` | Arch AppStream category matcher (`groups.tsv`) |
 | `appstream_icons.sh` | Arch AppStream icon catalog resolution |
 | `appstream_pins.sh` | Immutable, reviewed pin for the Arch AppStream catalog (version + sha256 set) |
+| `appstream_state.py` | Owner-checked, no-follow dirfd transactions for all state/cache writes, atomic replaces, and recursive deletes |
 | `flatpak_icon.py` | Name → Flathub app-id resolution for icons |
 | `groups.keywords` | Natural-language keyword → AppStream category table |
 | `alternatives.json` | Bundled curated metadata of FOSS alternatives to

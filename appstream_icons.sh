@@ -37,6 +37,12 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=appstream_pins.sh
 . "$SCRIPT_DIR/appstream_pins.sh"
+STATE_PY="$SCRIPT_DIR/appstream_state.py"
+
+# Every write/replace/delete on the user cache goes through the owner-checked,
+# no-follow dirfd transaction helper (see appstream_state.py). We never mkdir,
+# mktemp, mv, or rm on unchecked HOME paths; the helper pins the directory with
+# O_NOFOLLOW|O_DIRECTORY and refuses symlinked or foreign-owned components.
 
 # Network pin: use the reviewed constants unless a maintainer/test explicitly
 # overrides them (shipping defaults remain immutable).
@@ -57,7 +63,7 @@ STALE_DAYS=32
 mode="${1:-}"
 cache="${2:-$HOME/.cache/fossfetch}"
 STORE="$cache/catalog"
-mkdir -p "$STORE"
+python3 "$STATE_PY" ensure "$cache" || { echo "unsafe or unusable appstream cache path: $cache" >&2; exit 1; }
 
 # The tied (config, pacman-installed) local source of truth, used when the
 # archlinux-appstream-data package is present.
@@ -95,7 +101,12 @@ ensure_catalog() {
   fi
 
   target="$STORE/$want"
-  tmpdir=$(mktemp -d "$STORE/.tmp.XXXXXX") || { echo "mktemp failed" >&2; return 1; }
+  tmpname=$(python3 "$STATE_PY" tmpdir "$cache") || { echo "mktemp failed" >&2; return 1; }
+  tmpdir="$STORE/$tmpname"
+
+  cleanup_tmp() {
+    python3 "$STATE_PY" rmtree "$cache" "$tmpname" >/dev/null 2>&1 || true
+  }
 
   if local_available && [ "$want" = "$(local_version)" ]; then
     # Pacman-verified local data: copy (dereferenced) so the cache holds only
@@ -104,13 +115,13 @@ ensure_catalog() {
       src="$SWCATALOG/icons/archlinux-arch-$repo/$SIZE"
       if [ ! -d "$src" ]; then
         echo "local appstream icons missing: $src" >&2
-        rm -rf "$tmpdir"
+        cleanup_tmp
         return 1
       fi
       mkdir -p "$tmpdir/$repo"
       if ! cp -aL "$src"/. "$tmpdir/$repo"/ 2>/dev/null; then
         echo "failed to copy local appstream icons from $src" >&2
-        rm -rf "$tmpdir"
+        cleanup_tmp
         return 1
       fi
     done
@@ -224,28 +235,22 @@ for repo in repos.split():
 sys.exit(0)
 PY
     then
-      rm -rf "$tmpdir"
-      rm -rf "$STORE"/.tmp.* "$STORE"/*.old 2>/dev/null || true
+      cleanup_tmp
+      python3 "$STATE_PY" rmtmp "$cache" >/dev/null 2>&1 || true
       echo "appstream icon catalog fetch/verify failed (version $want)" >&2
       return 1
     fi
   fi
 
-  # Prune older catalog versions only after a successful swap, so a failed
-  # build never destroys the last good catalog.
-  for old in "$STORE"/*; do
-    case "$old" in
-      "$target") ;;
-      "$STORE"/.tmp.*|"$STORE"/*.old) ;;
-      *) [ -d "$old" ] && rm -rf "$old" ;;
-    esac
-  done
+  # Prune older catalog versions only after a successful build (via dirfds;
+  # foreign-owned or symlinked entries are refused, never followed), so a
+  # failed build never destroys the last good catalog.
+  python3 "$STATE_PY" prune "$cache" "$want" || { cleanup_tmp; return 1; }
 
-  if [ -d "$target" ]; then mv "$target" "$tmpdir.old" 2>/dev/null || rm -rf "$target"; fi
-  mv "$tmpdir" "$target" || { rm -rf "$tmpdir"; return 1; }
-  rm -rf "$tmpdir.old" 2>/dev/null || true
+  # Atomic swap of the freshly built catalog into place via the pinned dirfd.
+  python3 "$STATE_PY" swap "$cache" "$tmpname" "$want" || { cleanup_tmp; return 1; }
 
-  echo "$want" > "$marker"
+  printf '%s\n' "$want" | python3 "$STATE_PY" put "$cache" current || return 1
   return 0
 }
 
