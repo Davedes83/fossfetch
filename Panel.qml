@@ -323,6 +323,36 @@ Panel {
   property bool pacmanDone: false
   property bool flatpakDone: false
 
+  // ---------------------------------------------- per-tab backend status
+  // Set by the STATUS|frame scanning in each backend's result handler: a
+  // successful-but-empty search stays "", a failed lookup carries a short
+  // reason. Lets the empty state say "lookup failed" instead of implying
+  // there are simply no matching packages.
+  property string pacmanError: ""
+  property string flatpakError: ""
+  property string aurError: ""
+
+  function tabError() {
+    if (root.isPacman) return root.pacmanError
+    if (root.isFlatpak) return root.flatpakError
+    return root.aurError
+  }
+
+  // Pull a trailing "STATUS|ok|..." / "STATUS|error|..." frame out of a
+  // backend's stdout and return the detail ("" for ok, or the failure reason).
+  function statusDetail(lines) {
+    var detail = ""
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("STATUS|") !== 0) continue
+      var rest = lines[i].substring(7)  // "ok|msg" or "error|msg"
+      if (rest.indexOf("ok|") === 0)
+        detail = ""  // a successful (possibly empty) run is not an error
+      else if (rest.indexOf("error|") === 0)
+        detail = rest.substring(6)
+    }
+    return detail
+  }
+
   // Best-effort canonical Flathub icon URL for a flatpak app id.
   function flathubIcon(id) {
     return "https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/" + id + ".png"
@@ -337,6 +367,9 @@ Panel {
   function launchLiveSearch(q) {
     var seq = ++searchSeq
     root.pendingGroup = ({})
+    root.pacmanError = ""
+    root.flatpakError = ""
+    root.aurError = ""
     if (isPacman) {
       pacmanProc.mySeq = seq
       pacmanProc.running = false
@@ -344,6 +377,9 @@ Panel {
       // "G|pkg1|pkg2|..." marker line, then the normal `pacman -Ss` output
       // followed by a `pacman -Ss ^(pkg1|pkg2|...)$` whole-category search.
       // pkg names only come from the local groups index (never from user input).
+      // A trailing STATUS|frame distinguishes "ran, no matches" from "pacman
+      // missing/broken". `pacman -Ss` uses exit 1 for a no-match result (0 for
+      // a hit); only 127 (binary absent) or anything above 1 is a real failure.
       var pacmanScript =
         "Q=$1; C=$2; GS=$3\n"
         + "P=$( \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null )\n"
@@ -352,7 +388,9 @@ Panel {
         + "  echo \"G|$R\"\n"
         + "fi\n"
         + "pacman -Ss \"$Q\"\n"
-        + "if [ -n \"$P\" ]; then pacman -Ss \"^($R)$\"; fi\n"
+        + "RC=$?\n"
+        + "if [ -n \"$P\" ]; then pacman -Ss \"^($R)$\" >/dev/null 2>&1; fi\n"
+        + "if [ \"$RC\" -le 1 ]; then echo \"STATUS|ok|pacman\"; elif [ \"$RC\" -eq 127 ]; then echo \"STATUS|error|pacman not found (exit 127)\"; else echo \"STATUS|error|pacman -Ss failed (exit $RC)\"; fi\n"
       pacmanProc.command = ["sh", "-c", pacmanScript, "fossfetch-groups", q, root.iconCacheDir, root.appstreamGroupsScript]
       pacmanProc.running = true
     } else if (isFlatpak) {
@@ -360,14 +398,20 @@ Panel {
       flatpakProc.running = false
       // Group rows (app cat + meta) come first, tagged G| with flatpak-search
       // column order (name, desc, appid, version); then normal search output.
+      // The search result is buffered in a variable so its exit code can feed
+      // a STATUS|frame (no unchecked temp path is touched), distinguishing a
+      // failed search from a genuine empty result.
       var flatpakScript =
         "Q=$1; C=$2; GS=$3\n"
         + "python3 \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null |"
         + " awk -F'\\t' '{print \"G|\"$2\"\\t\"$3\"\\t\"$1\"\\t\"$4\"\\t\"$5}'\n"
-        + "flatpak search --columns=name,description,application,version \"$Q\" |"
+        + "OUT=$(flatpak search --columns=name,description,application,version \"$Q\" 2>/dev/null)\n"
+        + "RC=$?\n"
+        + "printf '%s\\n' \"$OUT\" |"
         + " awk -F'\\t' -v idx=\"$C/flathub/appids.tsv\" '"
         + " BEGIN { while ((getline l < idx) > 0) { split(l, a, \"\\t\"); d[a[1]] = a[2] } close(idx) }"
         + " NF >= 4 { print $0 (d[$3] != \"\" ? \"\\t\" d[$3] : \"\") }'\n"
+        + "if [ \"$RC\" -eq 0 ]; then echo \"STATUS|ok|flatpak\"; else echo \"STATUS|error|flatpak search failed (exit $RC)\"; fi\n"
       flatpakProc.command = ["sh", "-c", flatpakScript, "fossfetch-flatpak-groups", q, root.iconCacheDir, root.flathubGroupsScript]
       flatpakProc.running = true
     } else {
@@ -393,6 +437,8 @@ Panel {
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
+    // STATUS|frame: distinguish "ran, no matches" from a failed backend.
+    root.pacmanError = root.statusDetail(lines)
 
     // Parse every "repo/name version [arch]" header + description pair into a
     // list, then append each as a new live row (deduped against rows already
@@ -522,6 +568,8 @@ Panel {
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
+    // STATUS|frame: distinguish "ran, no matches" from a failed search.
+    root.flatpakError = root.statusDetail(lines)
     var added = 0
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
@@ -570,6 +618,8 @@ Panel {
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
+    // STATUS|frame: distinguish "ran, no matches" from a failed AUR lookup.
+    root.aurError = root.statusDetail(lines)
     var parsed = []
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
@@ -1890,7 +1940,9 @@ Panel {
                 text: root.query === ""
                   ? "Search " + (root.isPacman ? "an Arch package"
                     : root.isFlatpak ? "a Flatpak app" : "an AUR package")
-                  : "No " + (root.isPacman || root.isAur ? "packages" : "apps") + " found"
+                  : root.tabError() !== ""
+                    ? "Lookup failed"
+                    : "No " + (root.isPacman || root.isAur ? "packages" : "apps") + " found"
                 color: Color.popups.text
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
@@ -1902,8 +1954,10 @@ Panel {
               Text {
                 text: root.query === ""
                   ? "e.g. gimp, chromecast, vscode, obs, libreoffice"
-                  : "Try a different name"
-                color: Util.alpha(Color.popups.text, 0.5)
+                  : root.tabError() !== ""
+                    ? root.tabError()
+                    : "Try a different name"
+                color: root.tabError() !== "" ? Color.bad : Util.alpha(Color.popups.text, 0.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 textFormat: Text.PlainText

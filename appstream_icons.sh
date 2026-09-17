@@ -251,6 +251,12 @@ PY
   python3 "$STATE_PY" swap "$cache" "$tmpname" "$want" || { cleanup_tmp; return 1; }
 
   printf '%s\n' "$want" | python3 "$STATE_PY" put "$cache" current || return 1
+
+  # Commit the transient reap in the same build transaction: stale .tmp.* /
+  # *.old left by earlier interrupted builds must not linger next to a fresh
+  # "current" marker (failure paths reap; the success path now finishes the
+  # reap too, so a done-marker never coexists with build garbage).
+  python3 "$STATE_PY" rmtmp "$cache" >/dev/null 2>&1 || true
   return 0
 }
 

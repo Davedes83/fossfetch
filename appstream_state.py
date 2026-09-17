@@ -27,8 +27,14 @@ Commands (cacheRoot is the script cache root, usually $HOME/.cache/fossfetch):
                                     never following symlinks, and only entries
                                     owned by the effective user.
   rmtmp <cacheRoot>                 delete stale catalog/.tmp.* and catalog/*.old.
+                                    Callers run it to complete a build: after
+                                    the new catalog is swapped in and "current"
+                                    is written, so a fresh marker never coexists
+                                    with transient build leftovers.
   prune <cacheRoot> <keep>          delete every owned catalog entry except
                                     <keep> (and transient .tmp.* / *.old).
+                                    Transients are the reap's job, run after the
+                                    swap commits (see rmtmp).
   write-options <path>              atomically write stdin to <path>
                                     (default $HOME/.local/state/omarchy/settings/
                                     davedes.fossfetch.json), owner-checked.

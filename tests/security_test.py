@@ -8,6 +8,7 @@ Covers the review findings:
   * tar symlink / hardlink members            (appstream icons)
   * checksum binding before use               (appstream icons + groups)
   * QML Text.PlainText sinks + URL allowlist  (static scan of Panel.qml)
+  * STATUS|... error-vs-empty channel contract (AUR backend)
 
 Run:  python3 tests/security_test.py
 """
@@ -237,7 +238,33 @@ class FossFetchTests(unittest.TestCase):
             [sys.executable, AUR, "coolapp"],
             capture_output=True, text=True, timeout=60, env=e)
         self.assertEqual(p.returncode, 0)
-        self.assertEqual(p.stdout.strip(), "")
+        # A rejected response is reported through the STATUS channel instead of
+        # being silently indistinguishable from a legitimate empty result.
+        self.assertEqual(p.stdout.strip(), "STATUS|error|response rejected (oversized or unparseable)")
+
+    def test_aur_status_ok_empty(self):
+        # A successful search with zero matches must be distinguishable from a
+        # backend failure: no rows + a clear STATUS|ok|<count> frame.
+        self.srv.add("/aur/rpc", json_dumps({"results": []}).encode(), ct="application/json")
+        e = self.env()
+        e["AUR_RPC_URL"] = self.srv.url("/aur/rpc?y=1")
+        p = subprocess.run(
+            [sys.executable, AUR, "no-such-thing-xyz"],
+            capture_output=True, text=True, timeout=60, env=e)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout.strip(), "STATUS|ok|0")
+
+    def test_aur_status_error_network(self):
+        # An unreachable endpoint (no route added -> 404, and the server keeps
+        # the connection open per HTTP/1.1) surfaces as an explicit error frame
+        # rather than a silent empty result set.
+        e = self.env()
+        e["AUR_RPC_URL"] = self.srv.url("/aur-does-not-exist?y=1")
+        p = subprocess.run(
+            [sys.executable, AUR, "coolapp"],
+            capture_output=True, text=True, timeout=60, env=e)
+        self.assertEqual(p.returncode, 0)
+        self.assertTrue(p.stdout.startswith("STATUS|error|network:"), p.stdout)
 
     # ------------------------------------------------------- appstream icons
     def pin_env(self, sums):

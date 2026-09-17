@@ -13,7 +13,11 @@
 # "G|" line here — the whole search is live.
 #
 # Pure data on stdout (nothing else); always exits 0 so the panel's
-# StdioCollector gets a clean stream. Network errors yield an empty result set.
+# StdioCollector gets a clean stream. A single trailing STATUS frame lets the
+# panel tell apart a successful-but-empty result set from a backend failure:
+#
+#   STATUS|ok|<count>        search ran, <count> rows emitted above
+#   STATUS|error|<reason>    AUR lookup failed (network, oversized, ...)
 import json
 import os
 import sys
@@ -63,12 +67,16 @@ def main():
     query = sys.argv[1]
     try:
         data = fetch(query)
-    except Exception:
+    except Exception as e:
+        print("STATUS|error|network: %s" % cleanup(str(e)))
         return
-    if not data:
-        # Oversized / unparseable response: emit nothing (clean empty result).
+    if data is None:
+        # Oversized / unparseable response: emit a rejected frame instead of a
+        # silent (and misleadingly empty) result set.
+        print("STATUS|error|response rejected (oversized or unparseable)")
         return
-    results = data.get("results") or []
+    results = data.get("results") or [] if isinstance(data, dict) else []
+    count = 0
     for p in results:
         name = cleanup(p.get("Name"))
         if not name:
@@ -84,6 +92,8 @@ def main():
         votes = str(p.get("NumVotes") or "")
         lastmod = str(p.get("LastModified") or "")
         print("\t".join([name, desc, version, website, license_, pkgbase, votes, lastmod]))
+        count += 1
+    print("STATUS|ok|%d" % count)
 
 
 if __name__ == "__main__":
