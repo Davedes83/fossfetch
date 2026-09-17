@@ -94,7 +94,7 @@ def cache_root(arg):
 
 
 def stale(root):
-    marker = os.path.join(root, "catalog", "current")
+    marker = os.path.join(root, "flathub", "current")
     if not os.path.exists(marker):
         return True
     try:
@@ -151,11 +151,22 @@ def ensure(root):
                 cat = c.decode()
                 index.setdefault(cat, {})[aid] = (name, summary, version, released)
 
+    groups_dir = os.path.join(root, "flathub")
+    target = os.path.join(groups_dir, "groups.tsv")
     with open(target + ".tmp", "w") as fh:
         for cat, apps in sorted(index.items()):
             for aid, (name, summary, version, released) in sorted(apps.items()):
                 fh.write("%s\t%s\t%s\t%s\t%s\t%s\n" % (cat, aid, name, summary.replace("\t", " "), version, released))
     os.replace(target + ".tmp", target)
+
+    # Freshen the dedicated Flathub freshness marker (mtime = last successful
+    # build), atomically, mirroring appstream_icons.sh's post-build freshen of
+    # its own marker. Without this, stale() would report stale forever and the
+    # catalog would be rebuilt on every panel open.
+    marker = os.path.join(groups_dir, "current")
+    with open(marker + ".tmp", "w") as fh:
+        pass
+    os.replace(marker + ".tmp", marker)
 
     # Flatpak search rows (not category-mapped) also want a "last updated"
     # date, so also emit a compact appid -> latest-release-date index the

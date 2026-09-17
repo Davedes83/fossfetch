@@ -27,7 +27,7 @@ MAX_BYTES = int(os.environ.get("FOSSFETCH_MAX_AUR", "8388608"))  # 8 MiB cap
 def fetch(query):
     url = os.environ.get("AUR_RPC_URL", "https://aur.archlinux.org/rpc/")
     separator = "&" if "?" in url else "?"
-    url += separator + "v=5&type=search&arg=" + urllib.parse.quote(query)
+    url += separator + "v=5&type=search&arg=" + urllib.parse.quote(query, safe="")
     req = urllib.request.Request(url, headers={"User-Agent": "fossfetch-grouping/1.0"})
     # Bounded read: reject a declared Content-Length over the cap and abort once
     # `cap` actual bytes have been read (covers chunked responses).
@@ -76,7 +76,10 @@ def main():
         desc = cleanup(p.get("Description"))
         version = cleanup(p.get("Version"))
         website = cleanup(p.get("URL"))
-        license_ = cleanup(",".join(p.get("License") or []))
+        lic = p.get("License")
+        if isinstance(lic, str):
+            lic = [lic]
+        license_ = cleanup(",".join(lic or []))
         pkgbase = cleanup(p.get("PackageBase")) or name
         votes = str(p.get("NumVotes") or "")
         lastmod = str(p.get("LastModified") or "")
