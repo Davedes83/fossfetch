@@ -378,8 +378,10 @@ Panel {
       // followed by a `pacman -Ss ^(pkg1|pkg2|...)$` whole-category search.
       // pkg names only come from the local groups index (never from user input).
       // A trailing STATUS|frame distinguishes "ran, no matches" from "pacman
-      // missing/broken". `pacman -Ss` uses exit 1 for a no-match result (0 for
-      // a hit); only 127 (binary absent) or anything above 1 is a real failure.
+      // missing/broken". `pacman -Ss` exits 0 on a hit and 1 on no-match,
+      // but genuine failures also exit 1 — so only re-query stderr when the
+      // exit is non-zero (empty stderr = "no match"; an "error:" line = real
+      // failure). 127 = binary absent.
       var pacmanScript =
         "Q=$1; C=$2; GS=$3\n"
         + "P=$( \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null )\n"
@@ -390,7 +392,7 @@ Panel {
         + "pacman -Ss \"$Q\"\n"
         + "RC=$?\n"
         + "if [ -n \"$P\" ]; then pacman -Ss \"^($R)$\" >/dev/null 2>&1; fi\n"
-        + "if [ \"$RC\" -le 1 ]; then echo \"STATUS|ok|pacman\"; elif [ \"$RC\" -eq 127 ]; then echo \"STATUS|error|pacman not found (exit 127)\"; else echo \"STATUS|error|pacman -Ss failed (exit $RC)\"; fi\n"
+        + "if [ \"$RC\" -eq 0 ]; then echo \"STATUS|ok|pacman\"; elif [ \"$RC\" -eq 127 ]; then echo \"STATUS|error|pacman binary missing (exit 127)\"; else E=$(pacman -Ss \"$Q\" 2>&1 >/dev/null); if [ -z \"$E\" ]; then echo \"STATUS|ok|pacman\"; else echo \"STATUS|error|pacman: $E\"; fi; fi\n"
       pacmanProc.command = ["sh", "-c", pacmanScript, "fossfetch-groups", q, root.iconCacheDir, root.appstreamGroupsScript]
       pacmanProc.running = true
     } else if (isFlatpak) {
