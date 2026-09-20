@@ -1,7 +1,7 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/davedes)
 <img width="1024" height="1536" alt="preview" src="https://github.com/user-attachments/assets/51fffdce-fb8f-4d90-bd1b-f076dda6e3e3" />
 
-
+Like the plugin? ♥️ it on the Omarchy Marketplace to help others find it.
 # FossFetch
 
 A launcher-style package search for [Omarchy](https://omarchy.org/) that hunts on
