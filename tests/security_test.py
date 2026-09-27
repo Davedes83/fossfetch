@@ -19,7 +19,7 @@ import io
 import os
 import re
 import shutil
-import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -35,6 +35,9 @@ STATE = os.path.join(PLUGIN, "appstream_state.py")
 FLATHUB = os.path.join(PLUGIN, "flathub_groups.py")
 AUR = os.path.join(PLUGIN, "aur_search.py")
 PANEL = os.path.join(PLUGIN, "Panel.qml")
+PINS = os.path.join(PLUGIN, "appstream_pins.sh")
+BACKEND_PACMAN = os.path.join(PLUGIN, "backend_pacman.sh")
+BACKEND_FLATPAK = os.path.join(PLUGIN, "backend_flatpak.sh")
 
 VER = "20260101"
 
@@ -65,8 +68,16 @@ class FixtureServer:
             routes = self.server.routes
             spec = routes.get(self.path.split("?")[0])
             if spec is None:
+                # Content-Length + Connection: close are required here: with
+                # protocol_version HTTP/1.1 and neither header, the connection
+                # is kept alive and the client blocks until its own read
+                # timeout expires (20s for aur_search), instead of failing fast
+                # on a clean 404.
                 self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
                 self.end_headers()
+                self.close_connection = True
                 return
             payload = spec["data"]
             try:
@@ -178,9 +189,26 @@ class FossFetchTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def env(self):
-        e = os.environ.copy()
+        # Strip ambient overrides so a developer with FOSSFETCH_* / ARCH_BASE /
+        # AUR_RPC_URL / FLATHUB_APPSTREAM_URL exported does not get
+        # order-dependent, confusing failures. Each test supplies its own.
+        e = {k: v for k, v in os.environ.items()
+             if not k.startswith("FOSSFETCH_")
+             and k not in ("ARCH_BASE", "AUR_RPC_URL", "FLATHUB_APPSTREAM_URL")}
         e["HOME"] = self.root
         return e
+
+    def fake_bin(self, name, body):
+        """Create an executable stub on a private bin dir and return a PATH
+        that resolves `name` to it. Used to drive the backends' status logic
+        deterministically (a "flatpak" that exits 1 with no output, etc.)."""
+        d = os.path.join(self.root, "fakebin")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name)
+        with open(p, "w") as fh:
+            fh.write("#!/bin/sh\n" + body)
+        os.chmod(p, 0o755)
+        return d + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
 
     # ---------------------------------------------------------------- flathub
     def run_flathub(self, extra_env):
@@ -227,6 +255,28 @@ class FossFetchTests(unittest.TestCase):
         with open(target, encoding="utf-8") as fh:
             self.assertIn("Audio\torg.example.App", fh.read())
 
+    def test_flathub_newline_in_fields_is_flattened(self):
+        # Remote <name>/<summary> may contain tabs and newlines. Written
+        # verbatim, a newline splits one TSV record into two and the tail is
+        # emitted by resolve() as a phantom row with a garbage appid. Every
+        # field must be flattened to a single line.
+        xml = make_xml([("org.example.App", "Multi\nLine\tName", ["Audio"])])
+        self.srv.add("/flathub/appstream.xml.gz", gzip.compress(xml))
+        e = self.env()
+        e["FLATHUB_APPSTREAM_URL"] = self.srv.url("/flathub/appstream.xml.gz")
+        p = subprocess.run(
+            [sys.executable, FLATHUB, "ensure", os.path.join(self.root, "cache")],
+            capture_output=True, text=True, timeout=60, env=e)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        target = os.path.join(self.root, "cache", "flathub", "groups.tsv")
+        with open(target, encoding="utf-8") as fh:
+            lines = [l for l in fh.read().splitlines() if l]
+        # Exactly one record for the one component, and it is six fields.
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(len(lines[0].split("\t")), 6, lines[0])
+        self.assertNotIn("\n", lines[0])
+        self.assertIn("Multi Line Name", lines[0])
+
     # ------------------------------------------------------------------- AUR
     def test_aur_oversized(self):
         payload = json_dumps({"results": [{"Name": "pad"}] * 5000})
@@ -255,9 +305,8 @@ class FossFetchTests(unittest.TestCase):
         self.assertEqual(p.stdout.strip(), "STATUS|ok|0")
 
     def test_aur_status_error_network(self):
-        # An unreachable endpoint (no route added -> 404, and the server keeps
-        # the connection open per HTTP/1.1) surfaces as an explicit error frame
-        # rather than a silent empty result set.
+        # An unreachable endpoint (no route added -> a clean 404) surfaces as an
+        # explicit error frame rather than a silent empty result set.
         e = self.env()
         e["AUR_RPC_URL"] = self.srv.url("/aur-does-not-exist?y=1")
         p = subprocess.run(
@@ -265,6 +314,57 @@ class FossFetchTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60, env=e)
         self.assertEqual(p.returncode, 0)
         self.assertTrue(p.stdout.startswith("STATUS|error|network:"), p.stdout)
+
+    def test_aur_status_error_api_error(self):
+        # The RPC reports failures in-band, as a well-formed body with
+        # type:"error" and an empty results list. That must surface as an
+        # explicit error frame, NOT as a successful-but-empty search.
+        self.srv.add("/aur/rpc", json_dumps({
+            "version": 5, "type": "error", "resultcount": 0,
+            "error": "Too many results for query", "results": [],
+        }).encode(), ct="application/json")
+        e = self.env()
+        e["AUR_RPC_URL"] = self.srv.url("/aur/rpc?y=1")
+        p = subprocess.run(
+            [sys.executable, AUR, "a"],
+            capture_output=True, text=True, timeout=60, env=e)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(
+            p.stdout.strip(), "STATUS|error|aur: Too many results for query")
+        self.assertNotIn("STATUS|ok|", p.stdout)
+
+    def test_aur_malformed_payload_is_not_a_crash(self):
+        # A well-formed response whose content is unusable (results not a
+        # list, or entries that are not objects) is not a transport failure:
+        # report zero rows rather than raising and printing a traceback.
+        for payload in ({"results": "oops"}, {"results": [1, 2, 3]}):
+            with self.subTest(payload=payload):
+                self.srv.add("/aur/rpc", json_dumps(payload).encode(),
+                             ct="application/json")
+                e = self.env()
+                e["AUR_RPC_URL"] = self.srv.url("/aur/rpc?y=1")
+                p = subprocess.run(
+                    [sys.executable, AUR, "coolapp"],
+                    capture_output=True, text=True, timeout=60, env=e)
+                self.assertEqual(p.returncode, 0)
+                self.assertEqual(p.stdout.strip(), "STATUS|ok|0")
+                self.assertNotIn("Traceback", p.stderr)
+
+    def test_aur_license_field_never_raises(self):
+        # License is a string or list upstream, but the payload is remote and
+        # unvalidated: a dict (or a list of non-strings) must not reach
+        # str.join and turn a usable response into a crash.
+        self.srv.add("/aur/rpc", json_dumps({
+            "results": [{"Name": "pad", "License": {"a": 1}}],
+        }).encode(), ct="application/json")
+        e = self.env()
+        e["AUR_RPC_URL"] = self.srv.url("/aur/rpc?y=1")
+        p = subprocess.run(
+            [sys.executable, AUR, "pad"],
+            capture_output=True, text=True, timeout=60, env=e)
+        self.assertEqual(p.returncode, 0)
+        self.assertNotIn("Traceback", p.stderr)
+        self.assertTrue(p.stdout.strip().endswith("STATUS|ok|1"), p.stdout)
 
     # ------------------------------------------------------- appstream icons
     def pin_env(self, sums):
@@ -419,6 +519,59 @@ class FossFetchTests(unittest.TestCase):
         self.assertEqual(self.srv.requests, [],
                          "local source must not hit the network at all")
 
+    def test_catalog_preserved_when_version_indeterminate(self):
+        # A sealed local source with no derivable version used to compute an
+        # empty `want`, which then reached `prune "$cache" ""` — an empty keep
+        # value matches no entry, so the entire catalog was deleted before the
+        # swap failed on the empty path component. The contract that matters is
+        # simple: a build that does not succeed must not destroy the last good
+        # catalog, whatever the reason.
+        sw = os.path.join(self.root, "swcatalog")
+        for repo in ("core", "extra", "multilib"):
+            d = os.path.join(sw, "icons", "archlinux-arch-%s" % repo, "48x48")
+            os.makedirs(d)
+            with open(os.path.join(d, "gimp_org.gimp.GIMP.png"), "wb") as fh:
+                fh.write(b"\x89PNG-fake")
+        os.makedirs(os.path.join(sw, "xml"))
+
+        cache = os.path.join(self.root, "cache")
+        keeper = os.path.join(cache, "catalog", VER, "core", "gimp_org.gimp.GIMP.png")
+        os.makedirs(os.path.dirname(keeper))
+        with open(keeper, "wb") as fh:
+            fh.write(b"PRESERVED")
+        with open(os.path.join(cache, "catalog", "current"), "w") as fh:
+            fh.write(VER + "\n")
+
+        # A pacman that exists but fails the query => no derivable local version
+        # (FOSSFETCH_SWCATALOG is set, FOSSFETCH_SWCATALOG_VER is not).
+        e = self.env()
+        e["PATH"] = self.fake_bin("pacman", "exit 1\n")
+        e["FOSSFETCH_SWCATALOG"] = sw
+        e["ARCH_BASE"] = self.srv.url("/arch")
+        p = subprocess.run(
+            ["bash", ICONS, "ensure", cache],
+            capture_output=True, text=True, timeout=90, env=e)
+        # The build fails (nothing is served for the pinned version) ...
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        # ... but the previously built catalog is still there.
+        self.assertTrue(os.path.exists(keeper),
+                        "a failed build destroyed the existing catalog")
+
+    def test_groups_rejects_unusable_date_dir(self):
+        # The catalog version is read back from the `current` marker and used
+        # to build a path, so a corrupted/hand-edited marker must be refused
+        # rather than steering the build outside the catalog root.
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "catalog"))
+        with open(os.path.join(cache, "catalog", "current"), "w") as fh:
+            fh.write("../../../etc\n")
+        e = self.env()
+        e["ARCH_BASE"] = self.srv.url("/arch")
+        p = subprocess.run(
+            ["bash", GROUPS, "ensure", cache],
+            capture_output=True, text=True, timeout=90, env=e)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+
     # ---------------------------------------------- hardened state transactions
     def test_symlinked_cache_root_refused(self):
         # An attacker-preplanted symlink in the cache chain must be refused and
@@ -465,6 +618,113 @@ class FossFetchTests(unittest.TestCase):
         with open(target, encoding="utf-8") as fh:
             self.assertEqual("hostage", fh.read())
 
+    # ------------------------------------------------------------ pin sanity
+    def test_pins_wellformed_and_used_slots_distinct(self):
+        # The pin array IS the trust anchor for the network download path, so a
+        # hand-typing slip must not survive review. Read the committed values by
+        # sourcing the file in a bash subshell (it is pure data).
+        p = subprocess.run(
+            ["bash", "-c",
+             '. "$1"; printf "%s\\n" "$PINNED_PKGVER"; printf "%s\\n" "${PINNED_SHA256SUMS[@]}"',
+             "_", PINS],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = p.stdout.strip().splitlines()
+        self.assertGreaterEqual(len(lines), 2, p.stdout)
+        ver, pins = lines[0], lines[1:]
+
+        self.assertRegex(ver, r"^\d{8}$")
+        self.assertEqual(len(pins), 12, pins)
+        for pin in pins:
+            self.assertRegex(pin, r"^[0-9a-f]{64}$")
+
+        # Slots 0 (xml) and 1 (48x48) are the only ones read at runtime, and
+        # they must differ per repo — a copy-paste between them would let a
+        # mismatched archive verify against the wrong trust anchor. (Slots 2/3
+        # are NOT required to be distinct: upstream genuinely publishes some
+        # icon sizes with identical bytes, e.g. core 48x48 == 128x128 at
+        # pkgver 20260821. Asserting uniqueness there would fail on correct
+        # data, so do not.)
+        for i, repo in enumerate(("core", "extra", "multilib")):
+            with self.subTest(repo=repo):
+                self.assertNotEqual(pins[i * 4], pins[i * 4 + 1],
+                                    "xml and 48x48 pins must differ for " + repo)
+
+    # ------------------------------------------------ search backend STATUS
+    def run_backend(self, script, argv, path=None, env_extra=None):
+        e = self.env()
+        if path is not None:
+            e["PATH"] = path
+        if env_extra:
+            e.update(env_extra)
+        # Invoke via an absolute interpreter path: these tests deliberately set a
+        # minimal PATH (to control which backends resolve), which would
+        # otherwise hide `sh` itself from subprocess.
+        p = subprocess.run(
+            ["/bin/sh", script] + list(argv), capture_output=True, text=True,
+            timeout=60, env=e)
+        return p
+
+    def test_flatpak_backend_no_match_is_not_an_error(self):
+        # `flatpak search` exits 1 when it matches nothing, which is the common
+        # case for a query that finds no app. Treating any non-zero exit as a
+        # failure reported every legitimate miss as "Lookup failed".
+        path = self.fake_bin("flatpak", "exit 1\n")
+        stub = os.path.join(self.root, "groups_stub.py")
+        with open(stub, "w") as fh:
+            fh.write("#!/usr/bin/env python3\npass\n")
+        p = self.run_backend(
+            BACKEND_FLATPAK, ["nosuchapp-xyz", os.path.join(self.root, "cache"),
+                               stub], path=path)
+        self.assertIn("STATUS|ok|flatpak", p.stdout, p.stdout + p.stderr)
+        self.assertNotIn("STATUS|error", p.stdout)
+
+    def test_flatpak_backend_binary_missing_is_an_error(self):
+        stub = os.path.join(self.root, "groups_stub.py")
+        with open(stub, "w") as fh:
+            fh.write("#!/usr/bin/env python3\npass\n")
+        # A PATH with no flatpak at all.
+        empty = os.path.join(self.root, "emptybin")
+        os.makedirs(empty, exist_ok=True)
+        p = self.run_backend(
+            BACKEND_FLATPAK, ["gimp", os.path.join(self.root, "cache"), stub],
+            path=empty)
+        self.assertIn("STATUS|error|flatpak binary missing", p.stdout, p.stdout)
+
+    def test_flatpak_backend_rows_and_ok(self):
+        # A match: the row is passed through and the frame is still ok.
+        path = self.fake_bin(
+            "flatpak",
+            'printf "GIMP\\tGNU Image Manipulation\\torch.gimp.GIMP\\t2.10.38\\n"\n')
+        stub = os.path.join(self.root, "groups_stub.py")
+        with open(stub, "w") as fh:
+            fh.write("#!/usr/bin/env python3\npass\n")
+        p = self.run_backend(
+            BACKEND_FLATPAK, ["gimp", os.path.join(self.root, "cache"), stub],
+            path=path)
+        self.assertIn("orch.gimp.GIMP", p.stdout, p.stdout)
+        self.assertTrue(p.stdout.rstrip().endswith("STATUS|ok|flatpak"), p.stdout)
+
+    def test_pacman_backend_status_frames(self):
+        stub = os.path.join(self.root, "groups_stub.sh")
+        with open(stub, "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(stub, 0o755)
+        cache = os.path.join(self.root, "cache")
+
+        # no match: rc 1, empty stderr -> ok (not an error)
+        p = self.run_backend(BACKEND_PACMAN, ["nosuch-xyz", cache, stub],
+                             path=self.fake_bin("pacman", "exit 1\n"))
+        self.assertTrue(p.stdout.rstrip().endswith("STATUS|ok|pacman"), p.stdout)
+
+        # genuine failure: rc 1 with an error line on stderr -> error frame
+        p = self.run_backend(
+            BACKEND_PACMAN, ["gimp", cache, stub],
+            path=self.fake_bin("pacman",
+                               'echo "error: database missing" >&2\nexit 1\n'))
+        self.assertIn("STATUS|error|pacman: error: database missing",
+                      p.stdout, p.stdout)
+
     # ------------------------------------------------------------ QML static
     def test_qml_hardening(self):
         with open(PANEL, encoding="utf-8") as fh:
@@ -474,14 +734,30 @@ class FossFetchTests(unittest.TestCase):
         self.assertNotIn(
             "onClicked: Qt.openUrlExternally(delegateRoot.website)", src)
         self.assertIn("root.isSafeWebUrl(delegateRoot.website)", src)
-        # Every metadata / user-input text sink is plain text.
-        self.assertGreaterEqual(src.count("textFormat: Text.PlainText"), 10)
+        # Every metadata / user-input text sink is plain text. Assert on the
+        # specific sinks that receive remote data rather than a global count,
+        # so an unrelated refactor cannot silently change the guarantee.
         for probe in (
             'id: descText',        # package description
             'root.detailPoints(',  # version/repo/arch/license
             'FitText: Text {',     # component base (name + install labels)
         ):
             self.assertIn(probe, src)
+        # The rich-text sinks are the ones that matter: assert no Text element
+        # that binds remote metadata defaults to a rich-text format.
+        self.assertNotIn("textFormat: Text.RichText", src)
+        self.assertNotIn("textFormat: Text.AutoText", src)
+        self.assertNotIn("textFormat: Text.StyledText", src)
+
+    def test_qml_uses_extracted_backends(self):
+        # The pacman/flatpak STATUS|-frame logic lives in bundled scripts now,
+        # so it is directly testable (see the flatpak/pacman backend tests).
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("sh\", \"-c\", pacmanScript", src)
+        self.assertNotIn("sh\", \"-c\", flatpakScript", src)
+        self.assertIn("root.pacmanBackendScript", src)
+        self.assertIn("root.flatpakBackendScript", src)
 
 
 def json_dumps(obj):
@@ -490,11 +766,9 @@ def json_dumps(obj):
 
 
 def main():
-    import hashlib  # noqa: F401 (kept for parity with sha256 helper)
-    # Ensure the scripts exist and are executable.
-    for f in (ICONS, GROUPS):
-        if not os.access(f, os.X_OK):
-            os.chmod(f, 0o755)
+    # The scripts are invoked explicitly as `bash <script>` / `sh <script>`,
+    # so no execute bit is required and the suite never mutates file modes in
+    # the source tree.
     unittest.main(verbosity=2)
 
 

@@ -338,19 +338,21 @@ Panel {
     return root.aurError
   }
 
-  // Pull a trailing "STATUS|ok|..." / "STATUS|error|..." frame out of a
+  // Pull the trailing "STATUS|ok|..." / "STATUS|error|..." frame out of a
   // backend's stdout and return the detail ("" for ok, or the failure reason).
+  // The frame is always the LAST line, so only the tail is considered: scanning
+  // every line for a "STATUS|" prefix would let a package description or
+  // result row that happens to start with that text masquerade as a frame.
   function statusDetail(lines) {
-    var detail = ""
+    var frame = ""
     for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("STATUS|") !== 0) continue
-      var rest = lines[i].substring(7)  // "ok|msg" or "error|msg"
-      if (rest.indexOf("ok|") === 0)
-        detail = ""  // a successful (possibly empty) run is not an error
-      else if (rest.indexOf("error|") === 0)
-        detail = rest.substring(6)
+      if (lines[i].indexOf("STATUS|") === 0) frame = lines[i]
     }
-    return detail
+    if (frame === "") return ""
+    var rest = frame.substring(7)  // "ok|msg" or "error|msg"
+    if (rest.indexOf("ok|") === 0) return ""       // a successful (possibly empty) run is not an error
+    if (rest.indexOf("error|") === 0) return rest.substring(6)
+    return ""
   }
 
   // Best-effort canonical Flathub icon URL for a flatpak app id.
@@ -373,48 +375,23 @@ Panel {
     if (isPacman) {
       pacmanProc.mySeq = seq
       pacmanProc.running = false
-      // One shot: resolve the category -> packages mapping for <q>, emit a
-      // "G|pkg1|pkg2|..." marker line, then the normal `pacman -Ss` output
-      // followed by a `pacman -Ss ^(pkg1|pkg2|...)$` whole-category search.
-      // pkg names only come from the local groups index (never from user input).
-      // A trailing STATUS|frame distinguishes "ran, no matches" from "pacman
-      // missing/broken". `pacman -Ss` exits 0 on a hit and 1 on no-match,
-      // but genuine failures also exit 1 — so only re-query stderr when the
-      // exit is non-zero (empty stderr = "no match"; an "error:" line = real
-      // failure). 127 = binary absent.
-      var pacmanScript =
-        "Q=$1; C=$2; GS=$3\n"
-        + "P=$( \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null )\n"
-        + "if [ -n \"$P\" ]; then\n"
-        + "  R=$( printf '%s' \"$P\" | tr '\\n' '|' | sed 's/|$//' )\n"
-        + "  echo \"G|$R\"\n"
-        + "fi\n"
-        + "pacman -Ss \"$Q\"\n"
-        + "RC=$?\n"
-        + "if [ -n \"$P\" ]; then pacman -Ss \"^($R)$\" >/dev/null 2>&1; fi\n"
-        + "if [ \"$RC\" -eq 0 ]; then echo \"STATUS|ok|pacman\"; elif [ \"$RC\" -eq 127 ]; then echo \"STATUS|error|pacman binary missing (exit 127)\"; else E=$(pacman -Ss \"$Q\" 2>&1 >/dev/null); if [ -z \"$E\" ]; then echo \"STATUS|ok|pacman\"; else echo \"STATUS|error|pacman: $E\"; fi; fi\n"
-      pacmanProc.command = ["sh", "-c", pacmanScript, "fossfetch-groups", q, root.iconCacheDir, root.appstreamGroupsScript]
+      // One shot, in the bundled backend script (not an inline sh string, so
+      // it is directly regression-testable): resolve the category -> packages
+      // mapping for <q> as a "G|pkg1|pkg2|..." marker line, then the normal
+      // `pacman -Ss` output, then a single trailing STATUS|frame distinguishing
+      // "ran, no matches" from "pacman missing/broken". pkg names only come
+      // from the local groups index (never from user input), and the query is
+      // passed as argv, never interpolated into shell text.
+      pacmanProc.command = ["sh", root.pacmanBackendScript, q, root.iconCacheDir, root.appstreamGroupsScript]
       pacmanProc.running = true
     } else if (isFlatpak) {
       flatpakProc.mySeq = seq
       flatpakProc.running = false
-      // Group rows (app cat + meta) come first, tagged G| with flatpak-search
-      // column order (name, desc, appid, version); then normal search output.
-      // The search result is buffered in a variable so its exit code can feed
-      // a STATUS|frame (no unchecked temp path is touched), distinguishing a
-      // failed search from a genuine empty result.
-      var flatpakScript =
-        "Q=$1; C=$2; GS=$3\n"
-        + "python3 \"$GS\" resolve \"$C\" \"$Q\" 2>/dev/null |"
-        + " awk -F'\\t' '{print \"G|\"$2\"\\t\"$3\"\\t\"$1\"\\t\"$4\"\\t\"$5}'\n"
-        + "OUT=$(flatpak search --columns=name,description,application,version \"$Q\" 2>/dev/null)\n"
-        + "RC=$?\n"
-        + "printf '%s\\n' \"$OUT\" |"
-        + " awk -F'\\t' -v idx=\"$C/flathub/appids.tsv\" '"
-        + " BEGIN { while ((getline l < idx) > 0) { split(l, a, \"\\t\"); d[a[1]] = a[2] } close(idx) }"
-        + " NF >= 4 { print $0 (d[$3] != \"\" ? \"\\t\" d[$3] : \"\") }'\n"
-        + "if [ \"$RC\" -eq 0 ]; then echo \"STATUS|ok|flatpak\"; else echo \"STATUS|error|flatpak search failed (exit $RC)\"; fi\n"
-      flatpakProc.command = ["sh", "-c", flatpakScript, "fossfetch-flatpak-groups", q, root.iconCacheDir, root.flathubGroupsScript]
+      // Group rows (name, desc, appid, version, released) come first, tagged
+      // G|; then normal search output; then one trailing STATUS|frame. The
+      // frame is what keeps a legitimate miss ("no apps found") from being
+      // reported as a failed lookup — `flatpak search` exits 1 for both.
+      flatpakProc.command = ["sh", root.flatpakBackendScript, q, root.iconCacheDir, root.flathubGroupsScript]
       flatpakProc.running = true
     } else {
       aurProc.mySeq = seq
@@ -801,6 +778,10 @@ Panel {
     }
   }
 
+  // Absolute path to the bundled search backends. Kept as files (not inline
+  // `sh -c` strings) so their STATUS|-frame logic is directly regression-tested.
+  readonly property string pacmanBackendScript: Qt.resolvedUrl("./backend_pacman.sh").toString().replace("file://", "")
+  readonly property string flatpakBackendScript: Qt.resolvedUrl("./backend_flatpak.sh").toString().replace("file://", "")
   // Absolute path to the bundled AppStream-catalog icon resolver.
   readonly property string appstreamIconScript: Qt.resolvedUrl("./appstream_icons.sh").toString().replace("file://", "")
   readonly property string appstreamGroupsScript: Qt.resolvedUrl("./appstream_groups.sh").toString().replace("file://", "")

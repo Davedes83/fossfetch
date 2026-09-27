@@ -55,17 +55,39 @@ KEYWORDS="$SCRIPT_DIR/groups.keywords"
 
 local_available() {
   [ -d "$SWCATALOG/icons" ] && [ -d "$SWCATALOG/xml" ] || return 1
-  if [ -n "${FOSSFETCH_SWCATALOG:-}" ]; then return 0; fi # explicit test/sealed path
-  command -v pacman >/dev/null 2>&1 || return 1
-  pacman -Q archlinux-appstream-data >/dev/null 2>&1
+  local_version >/dev/null
+}
+
+# Cached pacman -Q result (see appstream_icons.sh for the shared rationale).
+PACMAN_VER=""
+pacman_appstream_version() {
+  if [ -z "$PACMAN_VER" ]; then
+    if command -v pacman >/dev/null 2>&1; then
+      PACMAN_VER=$(pacman -Q archlinux-appstream-data 2>/dev/null | awk '{print $2}')
+    else
+      PACMAN_VER="__no_pacman__"
+    fi
+  fi
+  [ "$PACMAN_VER" != "__no_pacman__" ] || return 1
+  [ -n "$PACMAN_VER" ] || return 1
+  printf '%s\n' "$PACMAN_VER"
 }
 
 local_version() {
   if [ -n "${FOSSFETCH_SWCATALOG_VER:-}" ]; then
-    echo "$FOSSFETCH_SWCATALOG_VER"
-  else
-    pacman -Q archlinux-appstream-data 2>/dev/null | awk '{print $2}'
+    printf '%s\n' "$FOSSFETCH_SWCATALOG_VER"
+    return 0
   fi
+  pacman_appstream_version
+}
+
+# The version string becomes a path component, so it must be a plain version.
+valid_version() {
+  case "$1" in
+    '')            return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *)             return 0 ;;
+  esac
 }
 
 # map a normalized keyword (lower-cased, spaces for _ -) to categories
@@ -86,6 +108,14 @@ ensure_groups() {
 
   [ -f "$STORE/current" ] || { echo "no appstream catalog; run appstream_icons.sh ensure first" >&2; return 1; }
   date_dir=$(cat "$STORE/current" 2>/dev/null)
+  # The marker is written by appstream_icons.sh, which validates it, but it is
+  # read back from disk and used to build a path — re-check it here so a
+  # hand-edited or corrupted marker can never steer the build outside the
+  # catalog root.
+  if ! valid_version "$date_dir"; then
+    echo "refusing group index build: unusable catalog version '$date_dir'" >&2
+    return 1
+  fi
   target="$STORE/$date_dir/groups.tsv"
   groups_mtime=$(stat -c %Y "$target" 2>/dev/null || echo 0)
   marker_mtime=$(stat -c %Y "$STORE/current" 2>/dev/null || echo 0)

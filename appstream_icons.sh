@@ -67,28 +67,68 @@ python3 "$STATE_PY" ensure "$cache" || { echo "unsafe or unusable appstream cach
 
 # The tied (config, pacman-installed) local source of truth, used when the
 # archlinux-appstream-data package is present.
+#
+# local_version is TOTAL: it prints a non-empty version and returns 0, or
+# returns non-zero without printing. local_available depends on that rather than
+# short-circuiting, so a sealed source with no derivable version is treated as
+# unavailable — we then fall back to the checksum-pinned network source instead
+# of building under an empty version (see the want= guard in ensure_catalog).
 local_available() {
   [ -d "$SWCATALOG/icons" ] && [ -d "$SWCATALOG/xml" ] || return 1
-  if [ -n "${FOSSFETCH_SWCATALOG:-}" ]; then return 0; fi # explicit test/sealed path
-  command -v pacman >/dev/null 2>&1 || return 1
-  pacman -Q archlinux-appstream-data >/dev/null 2>&1
+  local_version >/dev/null
+}
+
+# Cached pacman -Q result: the query is invoked several times per ensure, and
+# each call forks a process plus a pipe.
+PACMAN_VER=""
+pacman_appstream_version() {
+  if [ -z "$PACMAN_VER" ]; then
+    if command -v pacman >/dev/null 2>&1; then
+      PACMAN_VER=$(pacman -Q archlinux-appstream-data 2>/dev/null | awk '{print $2}')
+    else
+      PACMAN_VER="__no_pacman__"
+    fi
+  fi
+  [ "$PACMAN_VER" != "__no_pacman__" ] || return 1
+  [ -n "$PACMAN_VER" ] || return 1
+  printf '%s\n' "$PACMAN_VER"
 }
 
 local_version() {
   if [ -n "${FOSSFETCH_SWCATALOG_VER:-}" ]; then
-    echo "$FOSSFETCH_SWCATALOG_VER"
-  else
-    pacman -Q archlinux-appstream-data 2>/dev/null | awk '{print $2}'
+    printf '%s\n' "$FOSSFETCH_SWCATALOG_VER"
+    return 0
   fi
+  pacman_appstream_version
 }
 
+# The catalog version to build, or "" when the local source cannot supply one.
 expected_version() {
-  if local_available; then local_version; else echo "$PINNED_VER"; fi
+  if local_available; then local_version; else printf '%s\n' "$PINNED_VER"; fi
+}
+
+# A catalog version becomes a path component ("$STORE/$want") and is handed to
+# the state helper, so it must be a plain version string and nothing else.
+valid_version() {
+  case "$1" in
+    '')            return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *)             return 0 ;;
+  esac
 }
 
 ensure_catalog() {
   marker="$STORE/current"
-  want=$(expected_version) || want="$PINNED_VER"
+  want=$(expected_version)
+
+  # An empty or otherwise unusable version must never reach the state helper.
+  # `prune "$cache" ""` in particular would match no entry to keep and delete
+  # the whole catalog, then `swap` would fail on the empty path component —
+  # losing the last good build. Refuse before anything is created or removed.
+  if ! valid_version "$want"; then
+    echo "appstream catalog: refusing to build, unusable version '$want'" >&2
+    return 1
+  fi
 
   # Fresh + same version + tree present? Skip the build.
   if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$want" ] && [ -d "$STORE/$want" ]; then
@@ -108,9 +148,11 @@ ensure_catalog() {
     python3 "$STATE_PY" rmtree "$cache" "$tmpname" >/dev/null 2>&1 || true
   }
 
-  if local_available && [ "$want" = "$(local_version)" ]; then
+  if local_available; then
     # Pacman-verified local data: copy (dereferenced) so the cache holds only
-    # regular PNG files; rebuilds whenever `pacman -Q` version changes.
+    # regular PNG files; rebuilds whenever `pacman -Q` version changes. `want`
+    # is exactly local_version here (expected_version returned it), and it has
+    # already been validated, so there is no second lookup to race against.
     for repo in core extra multilib; do
       src="$SWCATALOG/icons/archlinux-arch-$repo/$SIZE"
       if [ ! -d "$src" ]; then
@@ -242,15 +284,18 @@ PY
     fi
   fi
 
-  # Prune older catalog versions only after a successful build (via dirfds;
-  # foreign-owned or symlinked entries are refused, never followed), so a
-  # failed build never destroys the last good catalog.
-  python3 "$STATE_PY" prune "$cache" "$want" || { cleanup_tmp; return 1; }
-
   # Atomic swap of the freshly built catalog into place via the pinned dirfd.
+  # This runs BEFORE the prune: swap parks any existing catalog as <src>.old
+  # and only drops it once the new tree is in position, so a failure here still
+  # leaves the last good catalog recoverable. Pruning first would delete the
+  # old versions and then lose the new build if the swap failed.
   python3 "$STATE_PY" swap "$cache" "$tmpname" "$want" || { cleanup_tmp; return 1; }
 
   printf '%s\n' "$want" | python3 "$STATE_PY" put "$cache" current || return 1
+
+  # Now that the new catalog is committed, drop superseded versions (via dirfs;
+  # foreign-owned or symlinked entries are refused, never followed).
+  python3 "$STATE_PY" prune "$cache" "$want" >/dev/null 2>&1 || true
 
   # Commit the transient reap in the same build transaction: stale .tmp.* /
   # *.old left by earlier interrupted builds must not linger next to a fresh

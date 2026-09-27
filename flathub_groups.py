@@ -71,6 +71,19 @@ def script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def clean(value):
+    """Flatten a value into a single TSV-safe field.
+
+    Every field written to groups.tsv / appids.tsv comes from remote AppStream
+    metadata, which may legally contain tabs, CRs or newlines. Those would
+    silently corrupt the line-oriented index: a newline in a <name> or <summary>
+    splits one record into two, and resolve() would then emit the tail as a
+    phantom row with a garbage appid. Collapse all whitespace that would break
+    the format, mirroring aur_search.py's cleanup().
+    """
+    return re.sub(r"[\t\r\n]+", " ", str(value or "")).strip()
+
+
 def load_synonyms():
     syn = {}
     path = os.path.join(script_dir(), "groups.keywords")
@@ -156,7 +169,11 @@ def ensure(root):
     with open(target + ".tmp", "w") as fh:
         for cat, apps in sorted(index.items()):
             for aid, (name, summary, version, released) in sorted(apps.items()):
-                fh.write("%s\t%s\t%s\t%s\t%s\t%s\n" % (cat, aid, name, summary.replace("\t", " "), version, released))
+                # Every field is flattened: remote metadata may contain tabs or
+                # newlines, which would break the one-record-per-line invariant.
+                fh.write("%s\t%s\t%s\t%s\t%s\t%s\n" % (
+                    clean(cat), clean(aid), clean(name), clean(summary),
+                    clean(version), clean(released)))
     os.replace(target + ".tmp", target)
 
     # Freshen the dedicated Flathub freshness marker (mtime = last successful
@@ -179,7 +196,7 @@ def ensure(root):
     appid_target = os.path.join(groups_dir, "appids.tsv")
     with open(appid_target + ".tmp", "w") as fh:
         for aid, released in sorted(appids.items()):
-            fh.write("%s\t%s\n" % (aid, released))
+            fh.write("%s\t%s\n" % (clean(aid), clean(released)))
     os.replace(appid_target + ".tmp", appid_target)
     print("built flathub groups: %d categories, %d apps" % (len(index), sum(len(v) for v in index.values())), file=sys.stderr)
     return True
@@ -197,20 +214,18 @@ def resolve(root, keyword):
     syn = load_synonyms()
     cats = syn.get(kw)
     if not cats:
-        for k, v in syn.items():
-            if kw == k:
-                cats = v
-                break
-    if not cats:
         return
     seen = set()
     with open(target, encoding="utf-8") as fh:
         for line in fh:
             parts = line.rstrip("\n").split("\t", 5)
-            if len(parts) < 5:
+            # Strict: the writer guarantees exactly six fields per record, so a
+            # short line means a malformed/truncated file. Skipping it (rather
+            # than tolerating it) is what stops a corrupted record from being
+            # silently emitted as a partial row.
+            if len(parts) != 6:
                 continue
-            cat, aid, name, summary, version = parts[:5]
-            released = parts[5] if len(parts) > 5 else ""
+            cat, aid, name, summary, version, released = parts
             if cat in cats and aid not in seen:
                 seen.add(aid)
                 print("%s\t%s\t%s\t%s\t%s" % (aid, name, summary, version, released))

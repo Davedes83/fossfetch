@@ -3,14 +3,33 @@
 # anchor for the network download path: they are committed to the reviewed
 # plugin source and verified by the approval process, and are never fetched or
 # derived from a remote at runtime. They correspond to the official Arch
-# `archlinux-appstream-data` package at pkgver 20260821 (PKGBUILD published by
-# Arch; sha256sums below are the maintainer-authored values for those sources).
+# `archlinux-appstream-data` package at pkgver 20260821.
 #
-# sha256sums() order — per repo (core, extra, multilib), four artifacts each:
+# Authoritative source of these values: the `sha256sums=(...)` array in the
+# upstream packaging PKGBUILD,
+#   https://gitlab.archlinux.org/archlinux/packaging/packages/archlinux-appstream-data
+# at the tag for this pkgver. Note that sources.archlinux.org does NOT publish a
+# `sha256sums` file for this package (it 404s) — the PKGBUILD array is the only
+# authoritative source. The artifacts themselves live at
+#   https://sources.archlinux.org/other/packages/archlinux-appstream-data/$pkgver/<repo>/
+# All 12 values below were re-verified against those downloaded artifacts on
+# 2026-09-27 and are correct as committed. `tools/update_pins.sh verify` re-runs
+# that check; `tools/update_pins.sh bump <pkgver>` regenerates this file.
+#
+# sha256sums order — per repo (core, extra, multilib), four artifacts each,
+# matching the PKGBUILD `source+=()` ordering:
 #   repo*4+0 = Components-x86_64.xml.gz
 #   repo*4+1 = icons-48x48.tar.gz
 #   repo*4+2 = icons-64x64.tar.gz
 #   repo*4+3 = icons-128x128.tar.gz
+#
+# NOTE: for this pkgver the upstream `core` icons-48x48.tar.gz and
+# icons-128x128.tar.gz are genuinely byte-identical (both hash 7989bb31...), as
+# published by Arch. This is a verified upstream property of the release, NOT a
+# copy-paste error here — do not "fix" it. (Upstream 20260910 goes further and
+# publishes all three core icon sizes with a single identical hash.) Only slots 0
+# (xml) and 1 (48x48) are read at runtime; slots 2 and 3 document the full
+# upstream sums and are covered by the well-formedness test.
 #
 # When Arch bumps pkgver/checksums, update this file in a new reviewed commit
 # (the shell keeps the previous, still-valid catalog until then). Prefer the
