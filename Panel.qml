@@ -116,7 +116,16 @@ Panel {
     running: false
     stdinEnabled: true
     property string pending: ""
-    onStarted: if (optionsWriter.pending !== "") optionsWriter.write(optionsWriter.pending)
+    onStarted: {
+      if (optionsWriter.pending === "") return
+      optionsWriter.write(optionsWriter.pending)
+      // appstream_state.py reads stdin to EOF before it writes anything, and
+      // Quickshell keeps the child's write channel open until stdinEnabled goes
+      // false. Without this close the helper blocks in read() forever, the
+      // options file is never updated, and every setting silently reverts to
+      // its last persisted value on shell reset.
+      optionsWriter.stdinEnabled = false
+    }
   }
 
   function setPanelDesign(d) {
@@ -139,6 +148,10 @@ Panel {
       showCoffee: root.showCoffeeButton
     }, null, 2) + "\n"
     optionsWriter.command = ["python3", root.appstreamStateScript, "write-options", root.optionsFilePath]
+    // Reopen the write channel for this run: onStarted closes it again to hand
+    // the helper its EOF. Set before the restart so a still-terminating
+    // previous run cannot race the new one.
+    optionsWriter.stdinEnabled = true
     optionsWriter.running = false
     optionsWriter.running = true
   }

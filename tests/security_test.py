@@ -618,6 +618,38 @@ class FossFetchTests(unittest.TestCase):
         with open(target, encoding="utf-8") as fh:
             self.assertEqual("hostage", fh.read())
 
+    # ---------------------------------------------------------- QML stdin EOF
+    def test_qml_options_writer_closes_stdin(self):
+        # appstream_state.py's write-options reads stdin to EOF before it writes
+        # anything, and Quickshell only closes the child's write channel when
+        # stdinEnabled goes false. A writer that misses the close blocks in
+        # read() forever: the options file is never written and every setting
+        # silently reverts on shell reset. The script-level test above cannot
+        # catch this because subprocess `input=` does close stdin.
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        block = re.search(r"Process \{\s*\n\s*id: optionsWriter\b.*?\n  \}",
+                          src, re.S)
+        self.assertIsNotNone(block, "optionsWriter Process not found in Panel.qml")
+        body = block.group(0)
+        write = body.find("optionsWriter.write(")
+        close = body.find("optionsWriter.stdinEnabled = false")
+        self.assertNotEqual(write, -1, "optionsWriter never writes its payload")
+        self.assertNotEqual(close, -1,
+                            "optionsWriter never closes stdin: write-options "
+                            "would block forever and options would not persist")
+        self.assertLess(write, close, "stdin must be closed after the write")
+
+        # persistOptions has to reopen the channel before restarting the helper,
+        # or every save after the first would write nothing at all.
+        fn = re.search(r"function persistOptions\(\) \{.*?\n  \}", src, re.S)
+        self.assertIsNotNone(fn, "persistOptions not found in Panel.qml")
+        fbody = fn.group(0)
+        self.assertIn("optionsWriter.stdinEnabled = true", fbody)
+        self.assertLess(fbody.find("optionsWriter.stdinEnabled = true"),
+                        fbody.find("optionsWriter.running = false"),
+                        "stdin must be reopened before the helper is restarted")
+
     # ------------------------------------------------------------ pin sanity
     def test_pins_wellformed_and_used_slots_distinct(self):
         # The pin array IS the trust anchor for the network download path, so a
