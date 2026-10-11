@@ -30,6 +30,12 @@ jobs:
   check:
     name: Check for a newer catalogue release
     runs-on: ubuntu-latest
+    # The workflow default above is contents: read, which is correct for the
+    # check itself. Opening the bump PR needs to push a branch and create a PR,
+    # so this job — and only this job — is widened.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -43,6 +49,14 @@ jobs:
             | sed -n 's/^pkgver=\([0-9]\{8\}\).*/\1/p' | head -1)
           echo "committed=${committed}"
           echo "upstream=${upstream}"
+          # These must be EXPORTED, not just echoed: the echo above only writes
+          # to the run log, so without the GITHUB_OUTPUT lines the next step
+          # received steps.probe.outputs.upstream == "" and ran
+          # `update_pins.sh bump ""`, which fails on its argument check.
+          {
+            echo "committed=${committed}"
+            echo "upstream=${upstream}"
+          } >> "$GITHUB_OUTPUT"
           if [ -z "$committed" ] || [ -z "$upstream" ]; then
             echo "could not read a pkgver from either side; skipping"
             echo "stale=false" >> "$GITHUB_OUTPUT"
