@@ -759,6 +759,192 @@ class FossFetchTests(unittest.TestCase):
                       p.stdout, p.stdout)
 
     # ------------------------------------------------------------ QML static
+    def test_model_js_unit_tests_pass(self):
+        """Run tests/model_test.js. The pure logic in Model.js is what the
+        panel evaluates on every keystroke; if it is not executed by the suite,
+        a refactor can break ranking/escaping/status parsing unnoticed."""
+        node = shutil.which("node") or shutil.which("nodejs")
+        if node is None:
+            self.skipTest("node not available; Model.js tests not run")
+        proc = subprocess.run(
+            [node, os.path.join(HERE, "model_test.js")],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0,
+                         "Model.js unit tests failed:\n%s" % (proc.stdout + proc.stderr))
+
+    def test_alternatives_removed_and_all_is_opt_in(self):
+        """Alternatives was dropped; the merged All tab must stay opt-in.
+
+        Regression guard for the settings default: 'All' fans out to three
+        backends per keystroke, so shipping it on by default would make the
+        launcher noticeably slower for everyone who never asked for it."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("alternatives.json", src)
+        self.assertNotIn("isAlternatives", src)
+        self.assertNotIn("alternativesEnabled", src)
+        self.assertFalse(os.path.exists(os.path.join(PLUGIN, "alternatives.json")))
+        # Default off, and the tab is only offered when it was switched on.
+        self.assertIn("property bool allEnabled: false", src)
+        self.assertIn("if (root.allEnabled && list.length > 2) list.push(3)", src)
+        self.assertIn("visible: root.allEnabled && root.visibleTabs().length > 3", src)
+        # Exactly three live backends remain.
+        for keep in ("isPacman", "isFlatpak", "isAur"):
+            self.assertIn("readonly property bool %s" % keep, src)
+
+    def test_removal_is_not_cascading(self):
+        """Removal must never take anything the user did not name.
+
+        A launcher uninstall button is the kind of thing people click without
+        reading. `pacman -Rns` would also delete dependencies still needed by
+        other installed software and skip the .pacsave safety net, so the
+        commands are pinned here to the non-cascading form."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        for bad in ('"pacman", "-Rns"', '"pacman", "-R", "-s"', '"paru", "-Rs"',
+                    '"yay", "-Rs"', '"pacman", "-Rsc"'):
+            # assertTrue rather than assertNotIn: a failure here would otherwise
+            # dump the whole 2900-line panel into the test output.
+            self.assertTrue(bad not in src,
+                            "removal must not cascade: found %r" % bad)
+        self.assertIn('args = ["sudo", "pacman", "-R", pkg]', src)
+        self.assertIn('args = ["flatpak", "uninstall", pkg]', src)
+        # Install and removal share one arm slot, so a card can never be armed
+        # for both at once.
+        self.assertIn("property var pendingAction: null", src)
+        self.assertTrue("pendingInstall" not in src,
+                        "the old parallel pendingInstall slot should be gone")
+        self.assertIn('actionPending("install"', src)
+        self.assertIn('actionPending("remove"', src)
+
+    def test_installed_rows_offer_removal(self):
+        """The green tick stays, and the button beside it becomes Remove."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # The tick still reports installed state for all three sources.
+        self.assertIn('text: "✓ Installed"', src)
+        self.assertIn('delegateRoot.installedPacman === "1"', src)
+        self.assertIn('delegateRoot.installedAur === "1"', src)
+        self.assertIn('delegateRoot.installedFlatpak === "1"', src)
+        # Every install button can also remove.
+        for kind in ("pacman", "yay", "paru", "flatpak"):
+            self.assertIn('onRemoved: root.startRemove("%s"' % kind, src)
+        # Enter on the cursor must do what the button shows.
+        self.assertIn('if (spec.mode === "remove") root.startRemove(', src)
+
+    def test_every_required_delegate_role_is_populated(self):
+        """Every `required property` in the result delegate must be a role the
+        model actually fills.
+
+        A missing one is not a crash and not a lint error — QML logs
+        "Required property X was not initialized", refuses to instantiate the
+        delegate, and the results list renders blank with no visible cause.
+        That is exactly what happened when a ternary lost its else branch and
+        row.installedFlatpak became undefined.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+
+        # Only the RESULTS delegate — other delegates (recents, sheet facts)
+        # bind to different models and have their own requirements. Bound the
+        # region at the next section marker so later delegates are not swept in.
+        start = src.index("model: filteredModel")
+        end = src.index("recent searches", start)
+        results = src[start:end]
+        required = set(re.findall(r"required property string (\w+)", results))
+
+        # Keys the model guarantees: the addRow defaults object, plus the
+        # properties assigned straight onto the row before it is appended.
+        addrow = src[src.index("function addRow(obj)"):]
+        addrow = addrow[:addrow.index("filteredModel.append(row)")]
+        # The defaults are written as one long comma-separated literal, so they
+        # must be read by pattern rather than line by line.
+        populated = set(re.findall(r"(\w+):\s*\"\"", addrow))
+        populated |= set(re.findall(r"row\.(\w+)\s*=", addrow))
+
+        missing = sorted(required - populated)
+        self.assertEqual(missing, [],
+                         "delegate declares required roles the model never sets: %s"
+                         % missing)
+
+        # And the reverse: a role set but never declared is dead weight.
+        # (Only warn-by-test, since a non-required role is legal.)
+
+    def test_role_assignments_are_complete_ternaries(self):
+        """`row.x = cond ? "a" :` parses and lints fine, then assigns undefined.
+
+        That is the exact shape of the bug that blanked the results list: the
+        delegate declared `required property string installedFlatpak`, the model
+        set it to undefined, QML logged "Required property ... was not
+        initialized", refused to build the delegate, and the panel rendered
+        blank. Nothing else in the toolchain notices, so assert the ternary is
+        complete for every conditional assignment into a model role.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        bad = []
+        for i, line in enumerate(lines, 1):
+            code = line.split("//")[0]
+            m = re.search(r"row\.(\w+)\s*=.*\?", code)
+            if not m:
+                continue
+            # The ELSE branch must exist and be non-empty. Testing for a ':'
+            # after the '?' is not enough — a truncated line *ends* with ':',
+            # which satisfies that check while leaving the value undefined.
+            tail = code[code.index("?") + 1:]
+            if ":" not in tail:
+                bad.append((i, code.strip(), "no ':' at all"))
+            elif tail.split(":", 1)[1].strip() == "":
+                bad.append((i, code.strip(), "empty else branch -> undefined"))
+        self.assertEqual(bad, [],
+                         "conditional role assignments missing an else branch:\n  "
+                         + "\n  ".join("%d: %s  [%s]" % b for b in bad))
+
+    def test_qml_parses(self):
+        """Panel.qml must have no QML syntax errors.
+
+        A single bad token makes the whole file fail to load, and the symptom is
+        not an error message in the panel — it is the panel simply never
+        opening, which looks like a click-handler bug and sends you hunting in
+        the wrong file. This check exists because a `.import "Model.js" as`
+        line (invalid; it must be `import "Model.js" as`) shipped exactly that
+        way, past two greps that only looked for the string "Failed to parse".
+        """
+        qmllint = shutil.which("qmllint") or "/usr/lib/qt6/bin/qmllint"
+        if not os.path.exists(qmllint):
+            self.skipTest("qmllint not available")
+        shell_ui = "/usr/share/omarchy/shell"
+        cmd = [qmllint]
+        if os.path.isdir(shell_ui):
+            cmd += ["-I", shell_ui]
+        cmd += [PANEL, os.path.join(PLUGIN, "BarWidget.qml")]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        out = proc.stdout + proc.stderr
+        # qmllint exits 0 and labels real syntax failures only as "Warning:
+        # ... [syntax]", so filter on the diagnostics themselves rather than the
+        # exit code or a single phrase.
+        bad = [ln for ln in out.splitlines()
+               if "[syntax]" in ln or "Failed to parse" in ln
+               or ": Error" in ln]
+        self.assertEqual(bad, [], "QML syntax errors:\n  " + "\n  ".join(bad))
+
+    def test_js_import_uses_valid_qml_syntax(self):
+        """`import "x.js" as N` is valid; `.import "x.js" as N` is not."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('import "Model.js" as Model', src)
+        # Match a real statement (line starts with `.import`), not the word
+        # appearing inside a comment.
+        bad_dot = [ln.strip() for ln in src.splitlines()
+                   if ln.strip().startswith(".import")]
+        self.assertEqual(bad_dot, [],
+                         ".import is not valid QML syntax and fails the whole file")
+        self.assertTrue(os.path.exists(os.path.join(PLUGIN, "Model.js")),
+                        "Model.js is imported but missing from the repo")
+        # The delegate must actually use the namespace, or the import is dead.
+        self.assertIn("Model.", src)
+
     def test_qml_hardening(self):
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()
@@ -787,23 +973,33 @@ class FossFetchTests(unittest.TestCase):
         self.assertEqual(src.count("textFormat: Text.RichText"), 1,
                          "exactly one rich-text sink is allowed (the card title)")
         self.assertIn("text: root.highlightName(delegateRoot.name)", src)
-        # Escaping helper escapes all three metacharacters...
-        esc = src[src.index("function escapeRich"):]
-        esc = esc[:esc.index("\n  }")]
-        for ch in ('&', '<', '>'):
+        # The escaping and highlighting logic now lives in Model.js (so it can
+        # be unit-tested); Panel.qml must delegate rather than reimplement it,
+        # or the tested code and the shipped code drift apart.
+        with open(os.path.join(PLUGIN, "Model.js"), encoding="utf-8") as fh:
+            model = fh.read()
+        self.assertIn("function escapeRich(s) { return Model.escapeRich(s) }", src)
+        self.assertIn("return Model.highlightName(name, root.query, root.matchColor)", src)
+        # Escaping helper neutralises every HTML metacharacter it could meet in
+        # an attribute as well as in text content.
+        esc = model[model.index("function escapeRich"):]
+        esc = esc[:esc.index("\n}")]
+        for ch in ('&', '<', '>', '"', "'"):
             self.assertIn("/%s/g" % ch, esc)
         # ...and highlightName runs every interpolated segment through it.
-        hl = src[src.index("function highlightName"):]
-        hl = hl[:hl.index("\n  }")]
+        hl = model[model.index("function highlightName"):]
+        hl = hl[:hl.index("\n}")]
         # Five calls: two early-return guards (empty query, no match) plus the
         # three interpolated segments — before, the match itself, and after.
-        self.assertEqual(hl.count("root.escapeRich("), 5)
-        for segment in ("root.escapeRich(n.slice(0, idx))",
-                        "root.escapeRich(n.slice(idx, idx + q.length))",
-                        "root.escapeRich(n.slice(idx + q.length))"):
+        self.assertEqual(hl.count("escapeRich("), 5)
+        for segment in ("escapeRich(n.slice(0, idx))",
+                        "escapeRich(n.slice(idx, idx + q.length))",
+                        "escapeRich(n.slice(idx + q.length))"):
             self.assertIn(segment, hl)
+        # The query is never concatenated into the output, only used to slice.
         self.assertNotIn("+ q +", hl)
         self.assertNotIn("+ query +", hl)
+        self.assertNotIn("+ query.length", hl)
         # The bar widget renders nothing but the user's own label.
         with open(os.path.join(PLUGIN, "BarWidget.qml"), encoding="utf-8") as fh:
             self.assertNotIn("RichText", fh.read())

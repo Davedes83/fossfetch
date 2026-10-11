@@ -6,23 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.1.0] — unreleased
 
-Two passes of work on the panel, the backends and the repository itself.
+Three passes of work on the panel, the backends and the repository itself.
+
+The curated **Alternatives** tab was built during this cycle and then removed
+again: it duplicated what a plain cross-source search already does well, and
+its curated catalogue was too thin to be worth the fourth tab. The remaining
+`All` tab merges the three live sources and is **off by default**.
 
 ### Added
 
-- **Alternatives tab** — the bundled `alternatives.json` (202 curated entries,
-  28 categories) was shipped but never loaded by any code, so the plugin's
-  headline promise had no implementation behind it. It is now a fourth tab:
-  type `photoshop`, `autocad`, `excel` or `slack` and get the FOSS
-  replacements with their real install sources. Entirely local — no subprocess,
-  no network, works offline.
+- **Remove from an installed package.** An installed package keeps its `✓
+  Installed` chip, and the button beside it becomes a working **Remove**
+  instead of an inert status pill. Removal is never cascading: `pacman -R`
+  removes only the package that was named, never `-Rs`/`-Rns`, because a
+  package's dependencies are usually still wanted by something else and taking
+  them silently breaks unrelated apps.
+- **A real confirm dialog for install and remove**, replacing the "click once,
+  then click again within 3 seconds" arm button. The old arm reverted with no
+  feedback when the timer expired, and a destructive removal was confirmed by
+  exactly the same gesture as an install.
+- **Details sheet** — dependency graph, installed size, provides/conflicts, and
+  a plain-language explanation of *why* the row matched (exact, prefix,
+  substring, punctuation-insensitive, fuzzy, or natural-language category).
+  "Required by" is fetched lazily from `pacman -Qi` only for installed rows,
+  because it is the field that tells you whether removing a package would break
+  something else — and `pacman -Si` does not report it at all.
+- **Unit-tested panel logic.** Ranking, date formatting, URL allowlisting,
+  cache-path containment, rich-text escaping, status-frame parsing, dependency
+  parsing and match explanation now live in `Model.js` and are covered by 95
+  assertions run in CI. Previously all of it was inline in `Panel.qml` with no
+  coverage at all.
 - **Cross-source install buttons actually appear.** The Flathub equivalent
   resolved for a Pacman or AUR result was used for its icon and then thrown
   away, so a card could never offer both. The app id is now attached to the row
   and a card carries `pacman (firefox)` *and* `flatpak (org.mozilla.firefox)`.
 - **Installed-state detection.** One batched `pacman -Qq` + `flatpak list`
-  snapshot marks what is already on the machine: the button becomes an inert
-  "✓ Installed" pill and the card carries an `✓ Installed` chip.
+  snapshot marks what is already on the machine: the card carries an
+  `✓ Installed` chip and the matching install button becomes a Remove action.
 - **AUR helper auto-detection.** The helper was hard-coded to `yay`, so a
   paru-only user got a button that opened a terminal running a command that
   does not exist, with no indication anything was wrong. `paru` / `yay` /
@@ -92,10 +112,14 @@ Two passes of work on the panel, the backends and the repository itself.
   category.
 - `O(n²)` model scans replaced with key → row index maps.
 - The first-open catalogue warm no longer downloads the Flathub index for users
-  who have switched both the Flatpak and Alternatives tabs off, and its progress
-  is now visible instead of silent.
+  who have switched the Flatpak search off, and its progress is now visible
+  instead of silent.
 
 ### Changed
+
+- **The `All` tab is off by default.** Merging all three backends is slower per
+  keystroke than searching one, which is the wrong trade for a launcher opened
+  dozens of times a day. Turn it on with **All results** in the options panel.
 
 - `alternatives.json` is no longer dead weight — it is the Alternatives tab.
 - Removed dead code: delegate roles nothing rendered (`rating`, `license`,

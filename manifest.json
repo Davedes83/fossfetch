@@ -55,7 +55,6 @@
     "aliases": [
       "foss",
       "finder",
-      "alternatives",
       "package search",
       "app store",
       "install apps"
@@ -65,7 +64,6 @@
   "repository": "https://github.com/Davedes83/fossfetch",
   "keywords": [
     "foss",
-    "alternatives",
     "packages",
     "pacman",
     "aur",

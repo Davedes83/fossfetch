@@ -5,9 +5,20 @@ import QtQuick.Layouts
 // padding, background and metrics) and silently restyle it.
 import QtQuick.Controls as QC
 import Quickshell
+
+// SPACING: every gap, margin and padding below uses a `Style.spacing.*` token so
+// a theme can override it by name. Sizes (card height, panel width, button
+// width) and the negative `anchors.margins` used for hover bleed stay as
+// `Style.space(N)` — the spacing token set has no names for those, and they
+// still scale with the user's font size via Style.effectiveSpacingScale. Use a
+// token for new spacing; use Style.space() only for a component's own size.
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+// Model.js is imported as a namespace with a plain `import "..." as`, which is
+// the only form QML accepts for a JS resource (`.import "..." as` is a syntax
+// error, and it fails the WHOLE file — the panel then silently never opens).
+import "Model.js" as Model
 
 // FossFetch browse panel. Three search-driven tabs list FOSS apps — Pacman
 // (Arch repos), Flatpak (Flathub) and AUR (Yay/Paru) — each with one-click
@@ -66,109 +77,19 @@ Panel {
     root.themeColors = parsed
   }
 
-  readonly property string alternativesPath: Qt.resolvedUrl("./alternatives.json").toString().replace("file://", "")
 
-  // Curated alternatives shipped with the plugin. This is what makes FossFetch
-  // an alternatives finder rather than a third search box: type "photoshop" and
-  // get the FOSS apps that replace it, with their real install sources.
-  property var alternatives: []
-  property string alternativesError: ""
-
-  FileView {
-    path: root.alternativesPath
-    watchChanges: false
-    printErrors: false
-    onLoaded: {
-      try {
-        var data = JSON.parse(text())
-        if (Array.isArray(data)) {
-          root.alternatives = data
-          root.alternativesError = ""
-        }
-      } catch (e) {
-        root.alternativesError = "alternatives.json could not be read"
-      }
-    }
-    onLoadFailed: root.alternativesError = "alternatives.json is missing"
-  }
-
-  // Rank a curated entry against the query. The `targetApp` field is the whole
-  // point of the file — a space-separated list of the proprietary apps this
-  // replaces — so a hit there outranks a hit on the FOSS app's own name.
-  function alternativeRank(entry, q) {
-    var name = String(entry.name || "").toLowerCase()
-    var category = String(entry.category || "").toLowerCase()
-    if (name === q) return 0
-    if (name.indexOf(q) === 0) return 1
-    // `targetApp` is a space-separated keyword list, so it is matched by whole
-    // token. A plain substring test is nonsense at this granularity — "word"
-    // matches "bitwarden", "music" matches "musical" — and the results read as
-    // if the matcher were broken.
-    var targets = String(entry.targetApp || "").toLowerCase().split(/\s+/)
-    for (var i = 0; i < targets.length; i++) {
-      if (targets[i] === q) return 2
-    }
-    if (name.indexOf(q) !== -1) return 3
-    if (category.indexOf(q) !== -1) return 4
-    return 5
-  }
-
-  function buildAlternatives(q) {
-    filteredModel.clear()
-    root.pkgIndex = ({})
-    root.flatpakIndex = ({})
-    resultsList.currentIndex = -1
-    var list = root.alternatives
-    if (!list || list.length === 0) return
-    if (q === "") {
-      // Browse mode: the whole catalogue, alphabetical, so the tab is useful
-      // before anything is typed.
-      var sorted = list.slice().sort(function (a, b) {
-        return String(a.name || "").localeCompare(String(b.name || ""))
-      })
-      for (var s = 0; s < sorted.length && s < 60; s++) root.addAlternativeRow(sorted[s])
-      return
-    }
-    var hits = []
-    for (var i = 0; i < list.length; i++) {
-      if (root.alternativeRank(list[i], q) < 5) hits.push(list[i])
-    }
-    hits.sort(function (a, b) {
-      var ra = root.alternativeRank(a, q)
-      var rb = root.alternativeRank(b, q)
-      if (ra !== rb) return ra - rb
-      return String(a.name || "").localeCompare(String(b.name || ""))
-    })
-    for (var j = 0; j < hits.length && j < 60; j++) root.addAlternativeRow(hits[j])
-  }
-
-  function addAlternativeRow(entry) {
-    root.addRow({
-      name: String(entry.name || ""),
-      description: String(entry.description || ""),
-      category: String(entry.category || ""),
-      repo: "alternatives",
-      version: "", arch: "", licenses: String(entry.license || ""),
-      updated: "",
-      website: String(entry.website || ""),
-      thumbnail: String(entry.thumbnail || ""),
-      iconName: String(entry.iconName || ""),
-      pacmanPkg: String(entry.pacmanPkg || ""),
-      aurPkg: String(entry.aurPkg || ""),
-      flatpakPkg: String(entry.flatpakPkg || "")
-    })
-  }
 
   // --------------------------------------------------------------- tabs
   property int activeTab: 0
   readonly property bool isPacman: activeTab === 0
   readonly property bool isFlatpak: activeTab === 1
   readonly property bool isAur: activeTab === 2
-  readonly property bool isAlternatives: activeTab === 3
   // "All" runs the three live backends at once into one list. The three
   // handlers already append into a shared model and de-duplicate by key, so
-  // this is a launcher change rather than a second code path.
-  readonly property bool isAll: activeTab === 4
+  // this is a launcher change rather than a second code path. It is opt-in
+  // (see allEnabled) because merging three backends is slower per keystroke
+  // than searching one, which is the wrong default for a launcher.
+  readonly property bool isAll: activeTab === 3
   readonly property bool isLive: root.isPacman || root.isFlatpak || root.isAur || root.isAll
   property string query: ""
 
@@ -178,7 +99,7 @@ Panel {
   // settings dir so the choices stick across shell restarts.
   property bool flatpakEnabled: true
   property bool aurEnabled: true
-  property bool alternativesEnabled: true
+  property bool allEnabled: false
   property string aurHelper: "yay"
   property bool showCoffeeButton: true
   property bool showOptions: false
@@ -218,9 +139,9 @@ Panel {
     root.persistOptions()
   }
 
-  function setAlternativesEnabled(v) {
-    root.alternativesEnabled = !!v
-    if (!root.alternativesEnabled && root.activeTab === 3) root.switchTab(0)
+  function setAllEnabled(v) {
+    root.allEnabled = !!v
+    if (!root.allEnabled && root.activeTab === 3) root.switchTab(0)
     root.persistOptions()
   }
 
@@ -304,7 +225,7 @@ Panel {
     optionsWriter.pending = JSON.stringify({
       flatpak: root.flatpakEnabled,
       aur: root.aurEnabled,
-      alternatives: root.alternativesEnabled,
+      all: root.allEnabled,
       aurHelper: root.aurHelper,
       design: root.panelDesign,
       showCoffee: root.showCoffeeButton,
@@ -329,7 +250,7 @@ Panel {
         var data = JSON.parse(text())
         if (typeof data.flatpak === "boolean") root.flatpakEnabled = data.flatpak
         if (typeof data.aur === "boolean") root.aurEnabled = data.aur
-        if (typeof data.alternatives === "boolean") root.alternativesEnabled = data.alternatives
+        if (typeof data.all === "boolean") root.allEnabled = data.all
         if (data.aurHelper === "yay" || data.aurHelper === "paru") root.aurHelper = data.aurHelper
         if (typeof data.showCoffee === "boolean") root.showCoffeeButton = data.showCoffee
         if (["current", "outline", "soft", "bold", "minimal", "icon"].indexOf(data.design) !== -1) root.panelDesign = data.design
@@ -357,9 +278,9 @@ Panel {
     var list = [0]
     if (root.aurEnabled) list.push(2)
     if (root.flatpakEnabled) list.push(1)
-    if (root.alternativesEnabled) list.push(3)
-    // Only worth a tab once there is something to merge.
-    if (list.length > 2) list.push(4)
+    // Only worth a tab once there is something to merge, and only if the
+    // user opted in.
+    if (root.allEnabled && list.length > 2) list.push(3)
     return list
   }
 
@@ -377,31 +298,25 @@ Panel {
     if (isAll) return "All"
     if (isPacman) return "Arch repos (Pacman)"
     if (isFlatpak) return "Flathub (Flatpak)"
-    if (isAlternatives) return "Alternatives"
     return "AUR (Yay / Paru)"
   }
   function tabCaption() {
     if (isAll) return "Search pacman, Flathub and the AUR at once"
     if (isPacman) return "Search pacman packages"
     if (isFlatpak) return "Search Flatpak apps"
-    if (isAlternatives) return "Find a FOSS replacement for something you use"
     return "Search AUR packages"
   }
   function tabPlaceholder() {
     if (isAll) return "Search everywhere… (gimp, spotify, libreoffice)"
     if (isPacman) return "Search Arch package… (gimp, obs, audacity)"
     if (isFlatpak) return "Search a Flatpak app… (gimp, obs, libreoffice)"
-    if (isAlternatives) return "What do you want to replace?… (photoshop, spotify, zoom)"
     return "Search AUR package… (spotify, google-chrome, vscode-bin)"
   }
 
   // Only plain http(s) links may be handed to the external browser. AUR,
   // pacman and Flatpak metadata may contain arbitrary URLs, so everything is
   // allowlisted before opening.
-  function isSafeWebUrl(u) {
-    var s = String(u || "").toLowerCase()
-    return s.indexOf("https://") === 0 || s.indexOf("http://") === 0
-  }
+  function isSafeWebUrl(u) { return Model.isSafeWebUrl(u) }
 
   function resolveThumb(remote, iconName) {
     if (remote !== "") {
@@ -428,12 +343,7 @@ Panel {
   // startsWith() would also accept a sibling like ~/.cache/fossfetch-evil or
   // ~/.cache/fossfetchX, since those share the prefix — which would let remote
   // metadata point Image.source at an arbitrary file the user owns.
-  function isInsideIconCache(path) {
-    var p = String(path || "")
-    var root_ = root.iconCacheDir
-    if (p === root_) return false          // the directory itself, not a file
-    return p.indexOf(root_ + "/") === 0
-  }
+  function isInsideIconCache(path) { return Model.isInsideCache(path, root.iconCacheDir) }
 
   // How tall the results list may be. Grows with the number of matches but
   // never past what fits between the bar and the screen edge, so the card
@@ -467,29 +377,8 @@ Panel {
   // locally-constructed Date. pacman prints Build Date in the machine's own
   // timezone; reading those fields back as UTC shifted the date by a day for
   // every user west of Greenwich.
-  function fmtUpdated(raw) {
-    var s = String(raw || "").trim()
-    if (!s) return ""
-    var d = null
-    if (/^\d+$/.test(s)) {
-      // AUR LastModified is an absolute instant, so local time is correct.
-      d = new Date(Number(s) * 1000)
-    } else {
-      var m = s.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d{1,2}) ([A-Z][a-z]{2}) (\d{4})/)
-      if (m) {
-        var months = {Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-                      Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11}
-        var mn = months[m[2]]
-        if (mn !== undefined) d = new Date(Number(m[3]), mn, Number(m[1]))
-      } else {
-        var iso = s.match(/(\d{4})-(\d{2})-(\d{2})/)
-        if (iso) d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
-      }
-    }
-    if (!d || isNaN(d.getTime())) return s
-    var labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    return d.getDate() + " " + labels[d.getMonth()] + " " + d.getFullYear()
-  }
+  function fmtUpdated(raw) { return Model.fmtUpdated(raw) }
+
 
   // Escape for a rich-text sink. Package and app names come from remote
   // metadata, and the card deliberately renders everything as PlainText so a
@@ -497,36 +386,16 @@ Panel {
   // place markup is genuinely useful, so the text is escaped FIRST and the only
   // tags in the result are the ones this function emits. The query itself is
   // never interpolated — only its length and offset are used.
-  function escapeRich(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  }
+  function escapeRich(s) { return Model.escapeRich(s) }
 
   function highlightName(name) {
-    var n = String(name || "")
-    var q = root.query.toLowerCase().trim()
-    if (q === "") return root.escapeRich(n)
-    var idx = n.toLowerCase().indexOf(q)
-    if (idx < 0) return root.escapeRich(n)
-    return root.escapeRich(n.slice(0, idx))
-         + '<font color="' + root.matchColor + '"><b>'
-         + root.escapeRich(n.slice(idx, idx + q.length))
-         + "</b></font>"
-         + root.escapeRich(n.slice(idx + q.length))
+    return Model.highlightName(name, root.query, root.matchColor)
   }
 
   // AUR trust signals. Shown as a single chip, worst-first: being flagged
   // out of date by the maintainer matters more than a low vote count, and a
   // crowd-maintained package with hundreds of votes needs no chip at all.
-  function trustLabel(e) {
-    if (!e) return ""
-    if (String(e.aurOutdated || "") !== "")
-      return "⚠ flagged out of date"
-    var v = parseInt(e.aurVotes, 10)
-    if (isNaN(v)) return ""
-    if (v <= 0) return "⚠ unrated"
-    if (v < 10) return v + " votes"
-    return ""
-  }
+  function trustLabel(e) { return Model.trustLabel(e) }
 
   function trustColor(e) {
     if (!e) return Color.popups.text
@@ -554,6 +423,102 @@ Panel {
     if (line1.length) pts.push(line1.join("  ·  "))
     if (line2.length) pts.push(line2.join("  ·  "))
     return pts
+  }
+
+  // ------------------------------------------------------- details sheet
+  // Why did this row show up? The ranker already knows the answer, so the sheet
+  // explains the match in the same terms the ranking used rather than inventing
+  // a second, possibly-contradictory explanation.
+  function matchReason(name) {
+    // pendingGroup is keyed by the exact package name (the same key the ranker
+    // uses), so the group test must use the raw name, not the folded one.
+    var inGroup = !!(root.pendingGroup && root.pendingGroup[String(name || "")] === true)
+    return Model.matchReasonFor(name, root.query, inGroup)
+  }
+
+
+  function depNames(field) { return Model.depNames(field) }
+
+
+  // The ordered fact list rendered by the sheet. Built as data (not markup)
+  // so the view stays dumb and the labels/ordering live in one place.
+  function sheetFacts(r) {
+    if (!r) return []
+    var d = root.depNames(r.dependsOn).length
+    var out = [
+      { label: "Source",   value: r.pacmanPkg !== "" ? "Arch repos — " + (r.repo || "pacman")
+                            : (r.aurPkg !== "" ? "AUR"
+                            : (r.flatpakPkg !== "" ? "Flathub" : "")) },
+      { label: "Version",  value: String(r.version || "") },
+      { label: "Architecture", value: String(r.arch || "") },
+      { label: "Licence",  value: String(r.licenses || "") },
+      { label: "Groups",   value: String(r.groups || "") },
+      { label: "Provides", value: String(r.provides || "") },
+      { label: "Download size",  value: String(r.downloadSize || "") },
+      { label: "Installed size", value: String(r.installedSize || "") },
+      { label: "Depends on (" + d + ")", value: String(r.dependsOn || "") },
+      { label: "Optional deps",  value: String(r.optionalDeps || "") },
+      { label: "Conflicts with", value: String(r.conflictsWith || "") }
+    ]
+    // Only for an installed pacman/AUR row, and only once `pacman -Qi` has
+    // answered — this is the warning that removal would break another package.
+    var req = String(r.requiredBy || "")
+    if (req !== "" && req !== "None") {
+      var names = root.depNames(req)
+      out.push({ label: "Required by (" + names.length + ")",
+                 value: names.join(", ") + "\n\nRemoving this will break the packages above." })
+    }
+    return out
+  }
+
+  property var detailRow: null
+
+  function openDetails(row) {
+    if (!row) return
+    root.detailRow = row
+    detailsSheet.open = true
+    root.fetchDepGraph(row)
+  }
+
+  function closeDetails() {
+    detailsSheet.open = false
+    root.detailRow = null
+  }
+
+  // `Required By` — which other installed packages depend on this one — is the
+  // field that decides whether removing it is safe, and it only exists in
+  // `pacman -Qi` (the installed DB), never in the -Si batch used for the card
+  // grid. It is fetched lazily, for installed rows only, when the sheet opens:
+  // one cheap call that answers "will removing this break something?".
+  function fetchDepGraph(row) {
+    var pkg = row && row.pacmanPkg ? row.pacmanPkg : (row && row.aurPkg ? row.aurPkg : "")
+    if (pkg === "" || root.isPacmanInstalled(pkg) !== true) return
+    if (root.rowIndexForPkg(pkg) < 0) return
+    qiProc.command = ["pacman", "-Qi", pkg]
+    qiProc.running = false
+    qiProc.running = true
+  }
+
+  Process {
+    id: qiProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyDepGraph(text || "")
+    }
+  }
+
+  function applyDepGraph(text) {
+    var s = String(text || "")
+    var name = (s.match(/^Name\s*:\s*(.+)$/m) || [])[1]
+    if (!name) return
+    var idx = filteredModel.rowIndexForPkg(name.trim())
+    if (idx < 0) return
+    var field = function(label) {
+      var m = s.match(new RegExp("^" + label + "\\s*:\\s*(.+)$", "mi"))
+      return m ? m[1].trim() : ""
+    }
+    var rb = field("Required By")
+    if (rb !== "") filteredModel.setProperty(idx, "requiredBy", rb)
   }
 
   // ------------------------------------------------------- result building
@@ -584,15 +549,6 @@ Panel {
   function rebuildResults() {
     var q = root.query.toLowerCase().trim()
     buildModel()
-    // The alternatives tab is entirely local — no subprocess, no network — so
-    // it short-circuits before any backend is launched.
-    if (root.isAlternatives) {
-      root.pacmanError = ""
-      root.flatpakError = ""
-      root.aurError = ""
-      buildAlternatives(q)
-      return
-    }
     if (q === "") return
     launchLiveSearch(q)
   }
@@ -621,6 +577,11 @@ Panel {
   property double installedAt: 0
 
   function isPacmanInstalled(pkg) {
+    return !!pkg && pkg !== "" && root.installedPacman[pkg] === true
+  }
+  // A helper-managed AUR package is a real pacman package — `pacman -Qq` lists
+  // it — so it is answered from the pacman snapshot, not a separate AUR query.
+  function isAurInstalled(pkg) {
     return !!pkg && pkg !== "" && root.installedPacman[pkg] === true
   }
   function isFlatpakInstalled(id) {
@@ -659,7 +620,9 @@ Panel {
       if (!r) continue
       var p = root.isPacmanInstalled(r.pacmanPkg) ? "1" : ""
       var f = root.isFlatpakInstalled(r.flatpakPkg) ? "1" : ""
+      var a = root.isAurInstalled(r.aurPkg) ? "1" : ""
       if (r.installedPacman !== p) filteredModel.setProperty(i, "installedPacman", p)
+      if (r.installedAur !== a) filteredModel.setProperty(i, "installedAur", a)
       if (r.installedFlatpak !== f) filteredModel.setProperty(i, "installedFlatpak", f)
     }
   }
@@ -696,17 +659,7 @@ Panel {
   // The frame is always the LAST line, so only the tail is considered: scanning
   // every line for a "STATUS|" prefix would let a package description or
   // result row that happens to start with that text masquerade as a frame.
-  function statusDetail(lines) {
-    var frame = ""
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("STATUS|") === 0) frame = lines[i]
-    }
-    if (frame === "") return ""
-    var rest = frame.substring(7)  // "ok|msg" or "error|msg"
-    if (rest.indexOf("ok|") === 0) return ""       // a successful (possibly empty) run is not an error
-    if (rest.indexOf("error|") === 0) return rest.substring(6)
-    return ""
-  }
+  function statusDetail(lines) { return Model.statusDetail(lines) }
 
   // Best-effort canonical Flathub icon URL for a flatpak app id.
   function flathubIcon(id) {
@@ -798,12 +751,15 @@ Panel {
       name: "", description: "", rating: "", website: "", license: "",
       category: "", repo: "", version: "", arch: "", licenses: "", updated: "",
       thumbnail: "", iconName: "", pacmanPkg: "", aurPkg: "", flatpakPkg: "", _pkg: "",
-      aurVotes: "", aurMaintainer: "", aurOutdated: "", downloadSize: ""
+      aurVotes: "", aurMaintainer: "", aurOutdated: "", downloadSize: "",
+      installedSize: "", dependsOn: "", optionalDeps: "", requiredBy: "",
+      conflictsWith: "", provides: "", groups: "", packager: ""
     }
     for (var key in strDefaults) {
       if (row[key] === undefined || row[key] === null) row[key] = strDefaults[key]
     }
     row.installedPacman = root.isPacmanInstalled(row.pacmanPkg) ? "1" : ""
+    row.installedAur = root.isAurInstalled(row.aurPkg) ? "1" : ""
     row.installedFlatpak = root.isFlatpakInstalled(row.flatpakPkg) ? "1" : ""
     filteredModel.append(row)
     var at = filteredModel.count - 1
@@ -934,37 +890,9 @@ Panel {
   // abbreviations and dropped characters, not transpositions — "froffox" still
   // misses "firefox", because the query is longer than any window that ordering
   // alone can recover.
-  function pacmanRank(name, q) {
-    var n = String(name).toLowerCase()
-    if (n === q) return 0
-    if (n.indexOf(q) === 0) return 1
-    if (n.indexOf(q) !== -1) return 2
-    var base = String(q).replace(/[^a-z0-9]/g, "")
-    if (base.length >= 3 && n.indexOf(base) !== -1) return 3
-    if (root.isFuzzySubsequence(q, n)) return 4
-    return 5
-  }
+  function pacmanRank(name, q) { return Model.rank(String(name).toLowerCase(), String(q).toLowerCase()) }
 
-  // True when every character of `q` appears in `n`, in order, with the first
-  // one landing near the start. Two constraints keep it from flooding the
-  // ranking with noise:
-  //   * under 3 characters matches almost any name, so it is rejected outright;
-  //   * the run must begin in the first three characters, otherwise "zz" style
-  //     coincidences deep inside a long package name would float to the top.
-  function isFuzzySubsequence(q, n) {
-    if (q.length < 3) return false
-    var qi = 0
-    var start = -1
-    for (var i = 0; i < n.length && qi < q.length; i++) {
-      if (n.charAt(i) !== q.charAt(qi)) continue
-      if (qi === 0) {
-        if (i > 2) return false
-        start = i
-      }
-      qi++
-    }
-    return start >= 0 && qi === q.length
-  }
+  function isFuzzySubsequence(q, n) { return Model.fuzzySubsequence(q, n) }
 
   // Index of an existing model row whose pacman package id matches `name`, or
   // -1 if it isn't shown yet. Backed by pkgIndex rather than a linear scan.
@@ -1479,7 +1407,7 @@ Panel {
       if (!r) continue
       var pk = r._pkg !== undefined && r._pkg !== "" ? r._pkg
              : (r.pacmanPkg !== undefined && r.pacmanPkg !== "" ? r.pacmanPkg : "")
-      // Empty keys are never indexed: the alternatives tab fills every row with
+      // Empty keys are never indexed: some rows are filled with
       // an empty _pkg, and storing "" would make every lookup hit row 0.
       if (pk !== "" && root.pkgIndex[pk] === undefined) root.pkgIndex[pk] = i
       var fp = r.flatpakPkg
@@ -1514,6 +1442,27 @@ Panel {
       var buildDate = field("Build Date")
       var size = field("Download Size")
       if (size !== "") filteredModel.setProperty(idx, "downloadSize", size)
+      // Dependency graph + installed footprint, read from the SAME `pacman -Si`
+      // batch rather than a second lookup per card.
+      //
+      // Field names are the sync-DB labels, which differ from the installed-DB
+      // ones: -Si says "Depends On" / "Optional Deps" and has no "Required By"
+      // at all (that only exists in -Qi, and is fetched lazily when the details
+      // sheet opens for an installed row — see fetchDepGraph).
+      var instSize = field("Installed Size")
+      if (instSize !== "") filteredModel.setProperty(idx, "installedSize", instSize)
+      var depends = field("Depends On")
+      if (depends !== "") filteredModel.setProperty(idx, "dependsOn", depends)
+      var optional = field("Optional Deps")
+      if (optional !== "") filteredModel.setProperty(idx, "optionalDeps", optional)
+      var conflicts = field("Conflicts With")
+      if (conflicts !== "") filteredModel.setProperty(idx, "conflictsWith", conflicts)
+      var provides = field("Provides")
+      if (provides !== "") filteredModel.setProperty(idx, "provides", provides)
+      var groups = field("Groups")
+      if (groups !== "") filteredModel.setProperty(idx, "groups", groups)
+      var packager = field("Packager")
+      if (packager !== "") filteredModel.setProperty(idx, "packager", packager)
       if (repo !== "") filteredModel.setProperty(idx, "repo", repo)
       if (version !== "") filteredModel.setProperty(idx, "version", version)
       if (arch !== "") filteredModel.setProperty(idx, "arch", arch)
@@ -1529,36 +1478,57 @@ Panel {
   // (shows "Confirm?"), a second click within the timeout runs the install
   // in the user's terminal. Independent per-branch/per-package so pacman and
   // flatpak buttons on the same card don't fight.
-  property var pendingInstall: null
-  Timer {
-    id: confirmResetTimer
-    interval: 3000
-    repeat: false
-    onTriggered: root.pendingInstall = null
+  // One pending-action slot shared by install and remove, backed by the shell's
+  // ConfirmDialog rather than the old "click once, then click again within 3
+  // seconds" arm button. The arm button had two problems: the timeout silently
+  // reverted with no feedback, and a destructive removal was confirmed by
+  // exactly the same gesture as an install. A real dialog names the action,
+  // cancels with Escape, and marks the destructive choice.
+  property var pendingAction: null
+
+  function pendingMessage() {
+    var a = root.pendingAction
+    if (!a) return ""
+    var verb = a.mode === "remove" ? "Remove" : "Install"
+    return verb + " " + (a.name || a.pkg) + " (" + a.pkg + ")?"
   }
 
-  function installPending(kind, pkg) {
-    return root.pendingInstall !== null
-      && root.pendingInstall.kind === kind
-      && root.pendingInstall.pkg === pkg
+  function confirmPendingAction() {
+    var a = root.pendingAction
+    if (!a) return
+    root.pendingAction = null
+    if (a.mode === "remove") root.runRemove(a.kind, a.pkg, a.name)
+    else root.runInstall(a.kind, a.pkg, a.name)
   }
+
+  function cancelPendingAction() {
+    root.pendingAction = null
+  }
+
+  function actionPending(mode, kind, pkg) {
+    return root.pendingAction !== null
+      && root.pendingAction.mode === mode
+      && root.pendingAction.kind === kind
+      && root.pendingAction.pkg === pkg
+  }
+
+  function installPending(kind, pkg) { return root.actionPending("install", kind, pkg) }
+  function removePending(kind, pkg) { return root.actionPending("remove", kind, pkg) }
 
   function startInstall(kind, pkg, name) {
-    // Second click on the same armed button runs the install.
-    if (root.installPending(kind, pkg)) {
-      root.runInstall(kind, pkg, name)
-      root.pendingInstall = null
-      return
-    }
-    root.pendingInstall = { kind: kind, pkg: pkg, name: name }
-    confirmResetTimer.restart()
+    root.pendingAction = { mode: "install", kind: kind, pkg: pkg, name: name }
+  }
+
+  function startRemove(kind, pkg, name) {
+    root.pendingAction = { mode: "remove", kind: kind, pkg: pkg, name: name }
   }
 
   // What the panel last launched, so the exit toast can name it. Captured at
-  // launch time rather than read off pendingInstall, which startInstall clears
+  // launch time rather than read off pendingAction, which startInstall clears
   // the moment the command is dispatched.
-  property string lastInstallLabel: ""
-  property string lastInstallKind: ""
+  property string lastActionLabel: ""
+  property string lastActionKind: ""
+  property string lastActionVerb: "install"
 
   function notify(title, body) {
     // Fire-and-forget. The shell runs a notification server, so this surfaces as
@@ -1586,18 +1556,49 @@ Panel {
     else if (kind === "yay") args = ["yay", "-S", "--needed", pkg]
     else if (kind === "paru") args = ["paru", "-S", "--needed", pkg]
     else args = ["flatpak", "install", "--assumeyes", "flathub", pkg]
-    root.lastInstallLabel = name || pkg
-    root.lastInstallKind = kind
+    root.lastActionLabel = name || pkg
+    root.lastActionKind = kind
+    root.lastActionVerb = "install"
 
     // Resolve the user's terminal (falls back to kitty, matching the shell).
     var term = Quickshell.env("TERMINAL")
     if (!term) term = Quickshell.env("TERMINAL_CMD")
     if (!term) term = "kitty"
-    installProc.command = [term, "-e"].concat(args)
-    installProc.running = true
+    actionProc.command = [term, "-e"].concat(args)
+    actionProc.running = true
     // The package will be installed by the time the user comes back to this
     // panel; re-read the snapshot so the row shows as Installed, not stale.
     installFinishedTimer.restart()
+  }
+
+  // Undo an install. Removal is more destructive than install (it can take
+  // away a working app, and removes dependencies the user may not realise are
+  // going), so the commands deliberately avoid cascading flags — nothing the
+  // user did not explicitly name is removed:
+  //   pacman -R removes exactly the named package and leaves everything else
+  //           alone. -s (recursive) is deliberately NEVER passed: a package's
+  //           dependencies are usually still wanted by other installed
+  //           software, and taking them silently breaks unrelated apps.
+  //           -n (no-save) is skipped so a .pacsave of the config is kept as a
+  //           way back.
+  //   yay/paru -R removes just the named package too — an AUR package is not a
+  //           dependency of other things, so plain -R is the honest default.
+  function runRemove(kind, pkg, name) {
+    var args
+    if (kind === "pacman") args = ["sudo", "pacman", "-R", pkg]
+    else if (kind === "yay") args = ["yay", "-R", pkg]
+    else if (kind === "paru") args = ["paru", "-R", pkg]
+    else args = ["flatpak", "uninstall", pkg]
+    root.lastActionLabel = name || pkg
+    root.lastActionKind = kind
+    root.lastActionVerb = "remove"
+
+    var term = Quickshell.env("TERMINAL")
+    if (!term) term = Quickshell.env("TERMINAL_CMD")
+    if (!term) term = "kitty"
+    actionProc.command = [term, "-e"].concat(args)
+    actionProc.running = true
+    removeFinishedTimer.restart()
   }
 
   // Give the terminal a moment to actually do the work before re-reading.
@@ -1608,19 +1609,30 @@ Panel {
     onTriggered: root.refreshInstalled(true)
   }
 
+  // Removal is slower than a reinstall (pacman resolves the dependency graph
+  // before touching anything), so it gets a longer settle before the installed
+  // snapshot is re-read.
+  Timer {
+    id: removeFinishedTimer
+    interval: 12000
+    repeat: false
+    onTriggered: root.refreshInstalled(true)
+  }
+
   Process {
-    id: installProc
+    id: actionProc
     // The terminal stays alive for the whole command, so its exit is a decent
-    // proxy for "the install finished". The exit code itself belongs to the
+    // proxy for "the action finished". The exit code itself belongs to the
     // terminal, not pacman, so the toast states the outcome neutrally and points
     // at the terminal rather than claiming success.
     onExited: {
-      var what = root.lastInstallLabel
+      var what = root.lastActionLabel
       if (what === "") return
       root.notify("FossFetch",
-        root.sourceLabel(root.lastInstallKind) + " finished for " + what + ". See the terminal for the result.")
+        root.sourceLabel(root.lastActionKind) + " " + root.lastActionVerb
+        + " finished for " + what + ". See the terminal for the result.")
       root.refreshInstalled(true)
-    root.clipboardSuggestion()
+      root.clipboardSuggestion()
     }
   }
 
@@ -1726,9 +1738,9 @@ Panel {
     archWarmProc.running = true
     root.archWarming = true
     // The Flathub index is a ~10 MB download and is only consulted by the
-    // Flatpak and Alternatives tabs — never start it for a user who has both
-    // switched off.
-    if (root.flatpakEnabled || root.alternativesEnabled) {
+    // Flatpak (and All) tabs — never start it for a user who has switched the
+    // Flatpak search off and not enabled All.
+    if (root.flatpakEnabled || root.allEnabled) {
       flathubWarmProc.command = ["python3", root.flathubGroupsScript, "ensure", root.iconCacheDir]
       flathubWarmProc.running = true
       root.flathubWarming = true
@@ -1751,7 +1763,7 @@ Panel {
 
   // Which catalogue the current tab is still waiting on, or "" when nothing is.
   function warmingLabel() {
-    if (root.isFlatpak || root.isAlternatives) {
+    if (root.isFlatpak || root.isAll) {
       if (root.flathubWarming) return "Building the Flathub index — category matches appear once it finishes."
       if (root.archWarming) return "Building the AppStream index — category matches appear once it finishes."
     } else if (root.archWarming) {
@@ -1775,21 +1787,31 @@ Panel {
   // active tab. Returns null when the row has no installable source.
   function cardInstallSpec(e) {
     if (!e) return null
-    if ((root.isPacman || root.isAlternatives || root.isAll) && e.pacmanPkg && e.pacmanPkg !== "")
-      return { kind: "pacman", pkg: e.pacmanPkg }
-    if ((root.isPacman || root.isAur || root.isAlternatives || root.isAll) && e.aurPkg && e.aurPkg !== "")
-      return { kind: root.aurHelper, pkg: e.aurPkg }
+    if ((root.isPacman || root.isAll) && e.pacmanPkg && e.pacmanPkg !== "") {
+      // Report which way this source would act, so Enter drives the same
+      // button the user can see rather than always re-installing.
+      return { mode: root.isPacmanInstalled(e.pacmanPkg) ? "remove" : "install",
+               kind: "pacman", pkg: e.pacmanPkg }
+    }
+    if ((root.isPacman || root.isAur || root.isAll) && e.aurPkg && e.aurPkg !== "") {
+      return { mode: root.isAurInstalled(e.aurPkg) ? "remove" : "install",
+               kind: root.aurHelper, pkg: e.aurPkg }
+    }
     return null
   }
 
-  // Enter on the highlighted card arms its install (first press shows the
-  // button's "Confirm?" state); a second press runs the command.
+  // Enter on the highlighted card arms its action (first press shows the
+  // button's "Confirm?" state); a second press runs the command. An
+  // already-installed row arms the removal instead.
   function activateCursor() {
     if (filteredModel.count === 0) return
     var idx = resultsList.currentIndex
     if (idx < 0 || idx >= filteredModel.count) return
-    var spec = root.cardInstallSpec(filteredModel.get(idx))
-    if (spec) root.startInstall(spec.kind, spec.pkg, filteredModel.get(idx).name)
+    var row = filteredModel.get(idx)
+    var spec = root.cardInstallSpec(row)
+    if (!spec) return
+    if (spec.mode === "remove") root.startRemove(spec.kind, spec.pkg, row.name)
+    else root.startInstall(spec.kind, spec.pkg, row.name)
   }
 
   // Tab cycles through the enabled tabs only (skips ones toggled off).
@@ -1824,7 +1846,13 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: searchField.activeFocus
-      onCloseRequested: root.close()
+      // Escape unwinds one layer at a time: the details sheet first, then the
+      // panel. Closing the whole panel with the sheet open would look like the
+      // sheet swallowed the key.
+      onCloseRequested: {
+        if (detailsSheet.open) root.closeDetails()
+        else root.close()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
       onActivateRequested: root.activateCursor()
@@ -1832,10 +1860,26 @@ Panel {
         if (t === "/") root.refreshFocus()
       }
 
+      // Confirmation for install/remove. Sits above the panel content and takes
+      // the keys that matter (Escape / Tab / Enter) from the search field,
+      // which is where focus lives.
+      ConfirmDialog {
+        id: actionConfirm
+        anchors.fill: parent
+        z: 10
+        opened: root.pendingAction !== null
+        message: root.pendingMessage()
+        confirmText: root.pendingAction && root.pendingAction.mode === "remove" ? "Remove" : "Install"
+        cancelText: "Cancel"
+        selectedIndex: 1
+        onConfirmed: root.confirmPendingAction()
+        onCanceled: root.cancelPendingAction()
+      }
+
       Column {
         id: panelColumn
         width: parent.width
-        spacing: Style.space(12)
+        spacing: Style.spacing.xxl
 
         // ------------------------------------------------------------ header
         // PanelHero is the shell's own header: it owns the icon/title/subtitle
@@ -1911,7 +1955,7 @@ Panel {
           RowLayout {
             id: tabRow
             anchors.fill: parent
-            spacing: Style.space(8)
+            spacing: Style.spacing.lg
 
             TabButton {
               id: pacmanTabBtn
@@ -1951,27 +1995,12 @@ Panel {
             TabButton {
               id: allTabBtn
               text: "All"
-              active: root.activeTab === 4
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              Layout.preferredWidth: 1
-              Layout.minimumWidth: 0
-              visible: root.visibleTabs().length > 3
-              onClicked: root.switchTab(4)
-            }
-
-            // The alternatives tab is the one that makes this a FossFetch
-            // rather than a third search box: it answers "what do I install
-            // instead of X?" entirely from the bundled catalogue.
-            TabButton {
-              id: alternativesTabBtn
-              text: "Alternatives"
               active: root.activeTab === 3
               Layout.fillWidth: true
               Layout.fillHeight: true
               Layout.preferredWidth: 1
               Layout.minimumWidth: 0
-              visible: root.alternativesEnabled
+              visible: root.allEnabled && root.visibleTabs().length > 3
               onClicked: root.switchTab(3)
             }
           }
@@ -2010,10 +2039,10 @@ Panel {
 
             Toggle {
               width: parent.width
-              label: "Alternatives"
-              description: "Show the curated \"replace it with FOSS\" tab"
-              checked: root.alternativesEnabled
-              onClicked: root.setAlternativesEnabled(!root.alternativesEnabled)
+              label: "All results"
+              description: "Add an \"All\" tab that searches Arch, Flathub and the AUR together"
+              checked: root.allEnabled
+              onClicked: root.setAllEnabled(!root.allEnabled)
             }
 
             // AUR install helper picker.
@@ -2034,7 +2063,7 @@ Panel {
               Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+                spacing: Style.spacing.md
 
                 HelperPill {
                   label: "yay"
@@ -2082,7 +2111,7 @@ Panel {
               Row {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(4)
+                spacing: Style.spacing.sm
 
                 HelperPill {
                   glyph: "\u25AA"
@@ -2246,7 +2275,7 @@ Panel {
               font.family: Style.font.family
               font.pixelSize: Style.font.title
               anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
+              anchors.leftMargin: Style.spacing.xxl
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(22)
               horizontalAlignment: Text.AlignHCenter
@@ -2261,9 +2290,9 @@ Panel {
               font.pixelSize: Style.font.body
               anchors.verticalCenter: parent.verticalCenter
               anchors.left: icon.right
-              anchors.leftMargin: Style.space(2)
+              anchors.leftMargin: Style.spacing.xxs
               anchors.right: parent.right
-              anchors.rightMargin: Style.space(6)
+              anchors.rightMargin: Style.spacing.md
               background: null
               selectByMouse: true
               onTextChanged: root.scheduleFilter()
@@ -2281,6 +2310,15 @@ Panel {
               // `blocked` whenever this field has focus, so the panel-level
               // handlers never see them.
               Keys.onPressed: function(event) {
+                // The confirm dialog owns Escape / Tab / Enter while it is up.
+                // It exposes handleKey() rather than grabbing focus itself, so
+                // it has to be fed the event from whatever currently holds it.
+                if (actionConfirm.opened) {
+                  if (actionConfirm.handleKey(event)) {
+                    event.accepted = true
+                    return
+                  }
+                }
                 if (event.key === Qt.Key_Escape) {
                   root.close()
                   event.accepted = true
@@ -2352,6 +2390,7 @@ Panel {
               // installed. Stamped by addRow() and refreshed by the installed
               // snapshot, so a row is correct the moment it appears.
               required property string installedPacman
+              required property string installedAur
               required property string installedFlatpak
               // AUR trust signals (empty on every other source).
               required property string aurVotes
@@ -2359,8 +2398,17 @@ Panel {
               required property string aurOutdated
               // "Downloaded: 12.4 MiB" straight from `pacman -Si`.
               required property string downloadSize
+              // Dependency graph + installed footprint for the details sheet.
+              required property string installedSize
+              required property string dependsOn
+              required property string optionalDeps
+              required property string requiredBy
+              required property string conflictsWith
+              required property string provides
+              required property string groups
+              required property string packager
               // `rating`, `license`, `category` and `_pkg` stay in the model
-              // (alternatives.json supplies them and the async writers resolve
+              // (and the async writers resolve
               // rows by _pkg through filteredModel.get(), not through a
               // delegate binding) but are deliberately not declared here: a
               // delegate only needs a role it actually draws.
@@ -2390,7 +2438,7 @@ Panel {
               // it draws on top of the fill but beneath the row content.
               Rectangle {
                 anchors.fill: parent
-                anchors.margins: Style.space(1)
+                anchors.margins: Style.spacing.hairline
                 radius: Math.max(2, Style.cornerRadius - Style.space(1))
                 color: "transparent"
                 border.width: 1.5
@@ -2401,7 +2449,7 @@ Panel {
               RowLayout {
                 id: delegateRow
                 anchors.fill: parent
-                anchors.margins: Style.space(10)
+                anchors.margins: Style.spacing.xl
                 spacing: 0
 
                 Item {
@@ -2409,7 +2457,7 @@ Panel {
                   Layout.preferredWidth: 52
                   Layout.preferredHeight: 52
                   Layout.alignment: Qt.AlignTop
-                  Layout.topMargin: Style.space(2)
+                  Layout.topMargin: Style.spacing.xxs
 
                   Rectangle {
                     anchors.fill: parent
@@ -2433,7 +2481,7 @@ Panel {
                   Image {
                     id: img
                     anchors.fill: parent
-                    anchors.margins: Style.space(6)
+                    anchors.margins: Style.spacing.md
                     source: root.resolveThumb(delegateRoot.thumbnail, delegateRoot.iconName)
                     fillMode: Image.PreserveAspectFit
                     antialiasing: true
@@ -2444,13 +2492,13 @@ Panel {
                 ColumnLayout {
                   Layout.fillWidth: true
                   Layout.fillHeight: true
-                  Layout.leftMargin: Style.space(10)
-                  spacing: Style.space(4)
+                  Layout.leftMargin: Style.spacing.xl
+                  spacing: Style.spacing.sm
 
                   // Row 1: Name (left) + Open Web/GitHub button (right)
                   RowLayout {
                     Layout.fillWidth: true
-                    spacing: Style.space(8)
+                    spacing: Style.spacing.lg
 
                     FitText {
                       // The ONLY rich-text sink in the panel; the string is
@@ -2468,6 +2516,22 @@ Panel {
                       // forces itself wider than the card — FitText shrinks the
                       // font to fit and only elides as a last resort.
                       Layout.minimumWidth: 0
+                    }
+
+                    // Opens the details sheet: dependency graph, installed
+                    // footprint, and why this row matched at all.
+                    Button {
+                      id: detailsButton
+                      visible: true
+                      focusable: false
+                      text: "Details"
+                      foreground: Util.alpha(Color.popups.text, 0.7)
+                      fontFamily: Style.font.family
+                      fontSize: Style.font.caption
+                      bordered: true
+                      Layout.preferredHeight: Style.space(24)
+                      Layout.minimumWidth: 0
+                      onClicked: root.openDetails(delegateRoot)
                     }
 
                     Button {
@@ -2524,7 +2588,7 @@ Panel {
                   // headings directly below the description.
                   Text {
                     Layout.fillWidth: true
-                    Layout.topMargin: Style.space(2)
+                    Layout.topMargin: Style.spacing.xxs
                     visible: root.detailPoints(delegateRoot).length > 0
                     // Long license/value text must be allowed to shrink (and
                     // elide) — otherwise its implicit width forces the whole
@@ -2554,8 +2618,8 @@ Panel {
                   // Row 4: Install buttons (bottom-right of the card)
                   RowLayout {
                     Layout.fillWidth: true
-                    Layout.topMargin: Style.space(2)
-                    spacing: Style.space(8)
+                    Layout.topMargin: Style.spacing.xxs
+                    spacing: Style.spacing.lg
 
                     // "Last updated" date in the bottom-left of the card, away
                     // from the install buttons on the right. Empty when the row
@@ -2604,6 +2668,7 @@ Panel {
                     Text {
                       Layout.alignment: Qt.AlignVCenter
                       visible: delegateRoot.installedPacman === "1"
+                             || delegateRoot.installedAur === "1"
                              || delegateRoot.installedFlatpak === "1"
                       text: "✓ Installed"
                       color: root.pacmanColor
@@ -2617,30 +2682,35 @@ Panel {
                     Item { Layout.fillWidth: true }
 
                     InstallButton {
-                      visible: (root.isPacman || root.isAlternatives || root.isAll) && delegateRoot.pacmanPkg !== ""
+                      visible: (root.isPacman || root.isAll) && delegateRoot.pacmanPkg !== ""
                       installKind: "pacman"
                       packageName: delegateRoot.pacmanPkg
                       installed: delegateRoot.installedPacman === "1"
                       isPending: root.installPending("pacman", delegateRoot.pacmanPkg)
                       onArmed: root.startInstall("pacman", delegateRoot.pacmanPkg, delegateRoot.name)
+                      onRemoved: root.startRemove("pacman", delegateRoot.pacmanPkg, delegateRoot.name)
                     }
 
                     InstallButton {
-                      visible: (root.isPacman || root.isAur || root.isAlternatives || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "yay"
+                      visible: (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "yay"
                       installKind: "yay"
                       packageName: delegateRoot.aurPkg
                       unavailable: !root.aurHelperInstalled
+                      installed: delegateRoot.installedAur === "1"
                       isPending: root.installPending("yay", delegateRoot.aurPkg)
                       onArmed: root.startInstall("yay", delegateRoot.aurPkg, delegateRoot.name)
+                      onRemoved: root.startRemove("yay", delegateRoot.aurPkg, delegateRoot.name)
                     }
 
                     InstallButton {
-                      visible: (root.isPacman || root.isAur || root.isAlternatives || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "paru"
+                      visible: (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "paru"
                       installKind: "paru"
                       packageName: delegateRoot.aurPkg
                       unavailable: !root.aurHelperInstalled
+                      installed: delegateRoot.installedAur === "1"
                       isPending: root.installPending("paru", delegateRoot.aurPkg)
                       onArmed: root.startInstall("paru", delegateRoot.aurPkg, delegateRoot.name)
+                      onRemoved: root.startRemove("paru", delegateRoot.aurPkg, delegateRoot.name)
                     }
 
                     // Shown whenever the row carries a Flathub app id — not just
@@ -2654,6 +2724,7 @@ Panel {
                       installed: delegateRoot.installedFlatpak === "1"
                       isPending: root.installPending("flatpak", delegateRoot.flatpakPkg)
                       onArmed: root.startInstall("flatpak", delegateRoot.flatpakPkg, delegateRoot.name)
+                      onRemoved: root.startRemove("flatpak", delegateRoot.flatpakPkg, delegateRoot.name)
                     }
                   }
                 }
@@ -2663,8 +2734,8 @@ Panel {
         }
 
         // ---------------------------------------------------- recent searches
-        // Only meaningful when nothing is typed: the alternatives tab shows its
-        // own browse list, and a live tab shows its own results.
+        // Only meaningful when nothing is typed: a live tab shows its own
+        // results, so recents fill otherwise-empty space.
         Item {
           width: parent.width
           visible: root.recentSearches.length > 0 && searchField.text.trim() === ""
@@ -2673,7 +2744,7 @@ Panel {
           Column {
             id: recentCol
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.spacing.sm
 
             RowLayout {
               width: parent.width
@@ -2706,7 +2777,7 @@ Panel {
 
             Flow {
               width: parent.width
-              spacing: Style.space(6)
+              spacing: Style.spacing.md
 
               Repeater {
                 model: root.recentSearches
@@ -2759,12 +2830,10 @@ Panel {
 
             Column {
               anchors.centerIn: parent
-              spacing: Style.space(6)
+              spacing: Style.spacing.md
 
               Text {
-                text: root.isAlternatives
-                  ? (root.query === "" ? "FOSS alternatives" : "No alternative found")
-                  : root.query === ""
+                text: root.query === ""
                     ? "Search " + (root.isAll ? "pacman, Flathub and the AUR"
                       : root.isPacman ? "an Arch package"
                       : root.isFlatpak ? "a Flatpak app" : "an AUR package")
@@ -2782,11 +2851,7 @@ Panel {
               Text {
                 text: root.warmingLabel() !== ""
                   ? root.warmingLabel()
-                  : root.isAlternatives
-                    ? (root.alternativesError !== "" ? root.alternativesError
-                      : root.query === "" ? root.alternatives.length + " curated replacements — try photoshop, spotify or zoom"
-                        : "Try the app you want to replace")
-                    : root.query === ""
+                  : root.query === ""
                       ? "e.g. gimp, chromecast, vscode, obs, libreoffice"
                       : root.tabError() !== ""
                         ? root.tabError()
@@ -2801,6 +2866,92 @@ Panel {
                 anchors.horizontalCenter: parent.horizontalCenter
               }
             }
+          }
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------- details sheet
+  // A separate PopupCard rather than an inline expansion: the results list has
+  // a fixed three-row viewport, so growing a card would either overflow the
+  // panel or force the layout to be recomputed mid-interaction. A popup keeps
+  // the grid exactly where it is and gives the dependency text room to be
+  // readable.
+  PopupCard {
+    id: detailsSheet
+    anchorItem: panel.anchorItem
+    bar: root.bar
+    owner: root.barIdentity
+    triggerMode: "click"
+    contentWidth: detailsSheet.fittedContentWidth(Style.space(460), Style.space(460))
+    contentHeight: detailsSheet.cappedContentHeight(detailsCol.implicitHeight)
+
+    Column {
+      id: detailsCol
+      width: parent.width
+      spacing: Style.spacing.sm
+
+      RowLayout {
+        width: parent.width
+        Text {
+          text: root.detailRow ? root.detailRow.name : ""
+          color: Color.popups.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.title
+          font.bold: true
+          textFormat: Text.PlainText
+          Layout.fillWidth: true
+          Layout.minimumWidth: 0
+          elide: Text.ElideRight
+        }
+        Button {
+          focusable: false
+          text: "✕"
+          foreground: Color.popups.text
+          fontFamily: Style.font.family
+          fontSize: Style.font.caption
+          onClicked: root.closeDetails()
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: root.detailRow ? root.matchReason(root.detailRow.name) : ""
+        color: Util.alpha(Color.popups.text, 0.6)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+      }
+
+      Repeater {
+        model: root.detailRow
+          ? root.sheetFacts(root.detailRow)
+          : []
+        delegate: Column {
+          required property var modelData
+          width: detailsCol.width
+          spacing: 0
+          visible: String(modelData.value) !== "" && String(modelData.value) !== "None"
+
+          Text {
+            width: parent.width
+            text: modelData.label
+            color: Util.alpha(Color.popups.text, 0.5)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            textFormat: Text.PlainText
+          }
+          Text {
+            width: parent.width
+            text: modelData.value
+            color: Color.popups.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
           }
         }
       }
@@ -2944,7 +3095,7 @@ Rectangle {
     Row {
       id: pillRow
       anchors.centerIn: parent
-      spacing: Style.space(4)
+      spacing: Style.spacing.sm
 
       Text {
         text: pill.glyph
@@ -2982,15 +3133,17 @@ Rectangle {
     property string installKind: ""
     property string packageName: ""
     property bool isPending: false
-    // Already installed: the button becomes an inert status pill rather than
-    // arming a re-install.
+    // Already installed. This does NOT disable the button — it turns it into
+    // the matching removal action, so the same control both installs and
+    // removes and the user never has to hunt for a separate "uninstall" path.
     property bool installed: false
-    // Its command cannot run on this machine (no AUR helper). Also inert, and
+    // Its command cannot run on this machine (no AUR helper). Inert, and
     // labelled so the failure is visible before it happens.
     property bool unavailable: false
-    readonly property bool actionable: !btn.installed && !btn.unavailable
+    readonly property bool actionable: !btn.unavailable
 
     signal armed()
+    signal removed()
 
     // Fixed-width pill: labels self-size and FitText shrinks the font to fit,
     // so a long AUR package name can never shove the button past the card edge
@@ -2999,14 +3152,16 @@ Rectangle {
     implicitHeight: Style.space(26)
 
     function label() {
-      if (btn.isPending) return "Confirm?"
-      if (btn.installed) return "✓ Installed"
+      if (btn.installed) return "Remove"
+      if (btn.isPending) return "Working…"
       if (btn.unavailable) return installKind + " missing"
       return btn.installKind + " (" + btn.packageName + ")"
     }
 
+    // Removal always wears the urgent colour: it is the one action here that
+    // takes something away, and it should never be mistaken for an install.
     function branchColor() {
-      if (btn.installed) return root.pacmanColor
+      if (btn.installed) return Color.urgent
       if (btn.unavailable) return Color.urgent
       if (installKind === "pacman") return root.pacmanColor
       if (installKind === "yay" || installKind === "paru") return root.aurColor
@@ -3044,7 +3199,7 @@ Rectangle {
       FitText {
         id: label
         anchors.fill: parent
-        anchors.margins: Style.space(4)
+        anchors.margins: Style.spacing.sm
         text: btn.label()
         color: btn.isPending ? root.confirmColor
           : !btn.actionable ? Util.alpha(btn.branchColor(), 0.8)
@@ -3062,7 +3217,10 @@ Rectangle {
       enabled: btn.actionable
       hoverEnabled: true
       cursorShape: btn.actionable ? Qt.PointingHandCursor : Qt.ArrowCursor
-      onClicked: btn.armed()
+      onClicked: {
+        if (btn.installed) btn.removed()
+        else btn.armed()
+      }
     }
   }
 }

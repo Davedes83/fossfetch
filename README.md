@@ -22,20 +22,17 @@ FossFetch — Browse open-source packages · Pacman + AUR + Flathub
 ## Features
 
 ### Search three ecosystems in one panel
-Three live-search tabs plus a curated alternatives tab:
 
 | Tab | Source | Live query |
 |-----|--------|------------|
 | **Pacman** | Arch repos (core / extra / multilib) | `pacman -Ss` |
 | **Flatpak** | Flathub | `flatpak search` + Flathub AppStream catalog |
 | **AUR** | Arch User Repository | AUR RPC `name-desc` search |
-| **Alternatives** | `alternatives.json` (bundled) | none — instant, fully offline |
 
-The **Alternatives** tab is the one that makes this an alternatives finder
-rather than a third search box: type the proprietary app you want to replace
-(`photoshop`, `autocad`, `excel`, `notion`, `slack`) and get the curated FOSS
-replacements with their real install sources. It is 100% local — no search box
-round trip, no network — so it opens instantly and works offline.
+An opt-in **All** tab merges all three into one list. It is **off by default**:
+merging three backends is slower per keystroke than searching one, which is the
+wrong trade for a launcher you open dozens of times a day. Turn it on with
+**All results** in the options panel.
 
 Both the Pacman and Flatpak tabs support **natural-language category browsing**
 — enter a phrase like `video editing`, `browser`, `music`, `terminal` or
@@ -81,8 +78,23 @@ The "Find App" pill in the bar restyles itself live. Choose from the options
 panel: **Current, Outline, Soft, Bold, Minimal, Icon** (a bare magnifying-glass
 glyph). The setting is pushed to the bar widget in real time and persists.
 
+### Install and remove
+An installed package keeps its `✓ Installed` chip and the button beside it
+becomes a working **Remove**. Removal is deliberately non-cascading: only the
+package you named is removed, never its dependencies, because those are
+usually still needed by something else. Both actions open a confirmation dialog
+naming the exact package.
+
+### Details sheet
+Each card has a **Details** button showing the dependency graph, installed and
+download size, provides/conflicts, and a plain-language explanation of *why*
+that result matched your query. For an installed package it also lists what
+requires it — the thing that tells you whether removing it would break
+something else.
+
 ### Options panel (gear icon)
-- Toggle the **AUR**, **Flatpak** and **Alternatives** tabs on/off.
+- Toggle the **AUR** and **Flatpak** tabs on/off.
+- Toggle the merged **All** tab on/off (**off by default**).
 - Clear the recent-search history.
 - Choose the AUR install helper: **yay** or **paru**. The helper is
   **auto-detected** on open — if the saved one is not installed but `paru`,
@@ -204,7 +216,7 @@ Options chosen in the panel are persisted to
 {
   "flatpak": true,
   "aur": true,
-  "alternatives": true,
+  "all": false,
   "aurHelper": "yay",
   "design": "current",
   "showCoffee": true
@@ -215,7 +227,7 @@ Options chosen in the panel are persisted to
 |-----|--------|---------|
 | `flatpak` | `true`/`false` | show the Flatpak tab |
 | `aur` | `true`/`false` | show the AUR tab |
-| `alternatives` | `true`/`false` | show the Alternatives tab |
+| `all` | `true`/`false` | show the merged **All** tab (default `false`) |
 | `aurHelper` | `yay`/`paru` | AUR install command |
 | `design` | `current`, `outline`, `soft`, `bold`, `minimal`, `icon` | toolbar pill style |
 | `showCoffee` | `true`/`false` | show the "Buy Me a Coffee" button |
@@ -264,13 +276,13 @@ Options chosen in the panel are persisted to
 | `appstream_state.py` | Owner-checked, no-follow dirfd transactions for all state/cache writes, atomic replaces, and recursive deletes |
 | `flatpak_icon.py` | Name → Flathub app-id resolution for icons |
 | `groups.keywords` | Natural-language keyword → AppStream category table |
-| `alternatives.json` | Bundled curated metadata of FOSS alternatives to
-  proprietary apps (the Alternatives tab) |
 | `backend_pacman.sh` / `backend_flatpak.sh` | Search backends: group rows + `STATUS\|` frame |
 | `catalog_markers.sh` | Shared build-state markers + growing retry backoff |
+| `Model.js` | Pure, unit-tested logic: ranking, dates, URL allowlist, cache containment, escaping, status-frame + dependency parsing, match explanation |
 | `CHANGELOG.md` | Release notes |
 | `manifest.json` | Omarchy plugin manifest (bar-widget) |
 | `tests/security_test.py` | Regression suite (runs in CI) |
+| `tests/model_test.js` | Unit tests for `Model.js` (runs in CI) |
 | `tools/update_pins.sh` | Maintainer-only pin bump/verify (never called at runtime) |
 | `tools/qml_lint.py` | Structural QML check (delimiter balance, tabs, whitespace) |
 
@@ -278,10 +290,9 @@ Options chosen in the panel are persisted to
 
 ## Known limitations
 
-- The Alternatives tab is only as good as `alternatives.json`. Coverage is
-  broad for office/graphics/media but thin for video conferencing, design tools
-  and some music clients — a query with no curated entry shows
-  "No alternative found". Adding an entry is a few lines of JSON.
+- The merged **All** tab fans out to three backends at once, so results stream
+  in over a longer window than a single-source search and a slow source holds
+  back its "done" marker. That is why it is opt-in.
 - AUR install buttons need `yay`, `paru` or `pikaur`; the panel auto-detects
   them and labels a missing helper, but cannot install one for you.
 - Flatpak results/installs require the `flathub` remote to be present.

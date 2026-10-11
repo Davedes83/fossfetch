@@ -20,10 +20,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       # The suite stubs pacman / flatpak and serves every download from an
       # in-process fixture server, so it needs neither Arch nor a network.
+      # It shells out to tests/model_test.js to cover Model.js (ranking,
+      # escaping, status-frame parsing) — the logic Panel.qml runs on every
+      # keystroke.
       - name: Run tests
         run: python tests/security_test.py
+
+      - name: Model.js unit tests (standalone)
+        run: node tests/model_test.js
 
       - name: QML structural check
         run: python tools/qml_lint.py
