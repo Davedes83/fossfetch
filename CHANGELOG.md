@@ -21,10 +21,14 @@ its curated catalogue was too thin to be worth the fourth tab. The remaining
   removes only the package that was named, never `-Rs`/`-Rns`, because a
   package's dependencies are usually still wanted by something else and taking
   them silently breaks unrelated apps.
-- **A real confirm dialog for install and remove**, replacing the "click once,
-  then click again within 3 seconds" arm button. The old arm reverted with no
-  feedback when the timer expired, and a destructive removal was confirmed by
-  exactly the same gesture as an install.
+- **A real confirm dialog for removal.** The old "click once, then click again
+  within 3 seconds" arm reverted with no feedback when the timer expired, and a
+  destructive removal was confirmed by exactly the same gesture as an install —
+  and removed nothing if the timer lapsed. Removal now goes through the shell's
+  ConfirmDialog, which names the package and stays up until answered.
+  Installing keeps the quick two-click arm on purpose: ConfirmDialog hardcodes
+  `destructive: index === 1`, so its second button always renders in the danger
+  colour — correct for "Remove", actively misleading for "Install".
 - **Details sheet** — dependency graph, installed size, provides/conflicts, and
   a plain-language explanation of *why* the row matched (exact, prefix,
   substring, punctuation-insensitive, fuzzy, or natural-language category).

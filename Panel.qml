@@ -1485,6 +1485,18 @@ Panel {
   // exactly the same gesture as an install. A real dialog names the action,
   // cancels with Escape, and marks the destructive choice.
   property var pendingAction: null
+  // Only an install uses the timed arm. A removal goes straight to the dialog,
+  // which stays up until you answer it — a destructive action should never
+  // expire out from under the cursor.
+  Timer {
+    id: confirmResetTimer
+    interval: 3000
+    repeat: false
+    onTriggered: {
+      if (root.pendingAction && root.pendingAction.mode === "install")
+        root.pendingAction = null
+    }
+  }
 
   function pendingMessage() {
     var a = root.pendingAction
@@ -1516,7 +1528,16 @@ Panel {
   function removePending(kind, pkg) { return root.actionPending("remove", kind, pkg) }
 
   function startInstall(kind, pkg, name) {
+    // Second click on the armed button runs it, as before. Installing is not
+    // destructive, and a modal dialog for every install is friction in a
+    // launcher you open all day.
+    if (root.installPending(kind, pkg)) {
+      root.pendingAction = null
+      root.runInstall(kind, pkg, name)
+      return
+    }
     root.pendingAction = { mode: "install", kind: kind, pkg: pkg, name: name }
+    confirmResetTimer.restart()
   }
 
   function startRemove(kind, pkg, name) {
@@ -1867,7 +1888,10 @@ Panel {
         id: actionConfirm
         anchors.fill: parent
         z: 10
-        opened: root.pendingAction !== null
+        // Destructive only. ConfirmDialog hardcodes `destructive: index === 1`,
+        // so its second button is always styled as the dangerous choice —
+        // correct for "Remove", wrong for an install.
+        opened: root.pendingAction !== null && root.pendingAction.mode === "remove"
         message: root.pendingMessage()
         confirmText: root.pendingAction && root.pendingAction.mode === "remove" ? "Remove" : "Install"
         cancelText: "Cancel"
@@ -3153,7 +3177,7 @@ Rectangle {
 
     function label() {
       if (btn.installed) return "Remove"
-      if (btn.isPending) return "Working…"
+      if (btn.isPending) return "Confirm?"
       if (btn.unavailable) return installKind + " missing"
       return btn.installKind + " (" + btn.packageName + ")"
     }
