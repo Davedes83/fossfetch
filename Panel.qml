@@ -1692,8 +1692,8 @@ Panel {
     refreshFocus()
     root.warmGroupIndexes()
     root.refreshInstalled(true)
-    root.detectAurHelperProc.running = false
-    root.detectAurHelperProc.running = true
+    detectAurHelperProc.running = false
+    detectAurHelperProc.running = true
   }
 
   // Which AUR helpers exist. `command -v` in a subshell so a missing binary is
@@ -2052,7 +2052,7 @@ Panel {
               visible: root.aurEnabled && Object.keys(root.aurHelpersInstalled).length > 0
                        && !root.aurHelperInstalled
               text: root.aurHelper + " is not installed — AUR installs will fail. Pick a helper you have, or install one."
-              color: Color.bad
+              color: Color.urgent
               font.family: Style.font.family
               font.pixelSize: Style.font.caption - 1
               wrapMode: Text.WordWrap
@@ -2787,7 +2787,7 @@ Panel {
                       : root.tabError() !== ""
                         ? root.tabError()
                         : "Try a different name"
-                color: root.tabError() !== "" ? Color.bad : Util.alpha(Color.popups.text, 0.5)
+                color: root.tabError() !== "" ? Color.urgent : Util.alpha(Color.popups.text, 0.5)
                 horizontalAlignment: Text.AlignHCenter
                 width: Math.min(implicitWidth, parent.width)
                 wrapMode: Text.WordWrap
@@ -3003,7 +3003,7 @@ Rectangle {
 
     function branchColor() {
       if (btn.installed) return root.pacmanColor
-      if (btn.unavailable) return Color.bad
+      if (btn.unavailable) return Color.urgent
       if (installKind === "pacman") return root.pacmanColor
       if (installKind === "yay" || installKind === "paru") return root.aurColor
       return root.flatpakColor
