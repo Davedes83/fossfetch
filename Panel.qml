@@ -1859,8 +1859,12 @@ Panel {
           trailingControl: Component {
             Rectangle {
               id: optionsBtn
-              Layout.preferredWidth: Style.space(22)
-              Layout.preferredHeight: Style.space(20)
+              // implicitWidth/Height, NOT Layout.preferred*: PanelHero loads this
+              // through a plain Loader, so its parent is an Item, not a Layout —
+              // Layout attached properties are ignored there and the rectangle
+              // collapses to zero size, leaving its MouseArea unclickable.
+              implicitWidth: Style.space(22)
+              implicitHeight: Style.space(20)
               radius: Style.cornerRadius
               color: root.showOptions
                 ? Style.selectedFillFor(Color.popups.text, Color.accent)
