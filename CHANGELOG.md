@@ -4,6 +4,62 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — unreleased
+
+A visual pass over the whole panel. Nothing about what FossFetch does changed;
+how it looks while doing it did.
+
+### Fixed
+
+- **Two icons were the wrong glyph.** The header mark and the search field both
+  drew `U+F002` — Font Awesome's *bookmark*. The app's logo was a bookmark and
+  the search box offered you a bookmark instead of a magnifier. Every glyph now
+  comes from the Material Design set the rest of the shell draws, and the
+  codepoints were read out of the font this machine actually resolves rather
+  than copied by hand.
+- **The toolbar icon was in the wrong font.** `BarWidget.qml` set no
+  `font.family` on its glyph at all, so the one control visible in the bar all
+  day rendered in whatever fallback the process happened to get.
+- **Metadata was being elided mid-word.** `Repo: extra…`, `Updated: 28 …` — a
+  single shared text line was squeezed between the install buttons and cut the
+  *values* off. Every fact on a card is now its own chip, which wraps instead
+  of truncating.
+- The `Installed` tick had no space between it and its label.
+
+### Changed
+
+- **One segmented control instead of three outlined tab pills.** Outlining all
+  three tabs gave "Pacman", "AUR" and "Flatpak" identical weight, so the active
+  one read as "also selected". The old `TabButton` component is gone.
+- **One action hierarchy on a card.** Install/Remove is the only filled
+  control; Details and Web became borderless icon-only buttons. Details and Web
+  were carrying full text labels in ~40px, which is what made the row look like
+  a form.
+- **Install/Remove lost its pictogram.** A 10px glyph beside 10px text in a
+  26px pill is visual mud. The label already says "Remove" or "pacman (gmp)",
+  so the weight comes from the fill and the source colour instead.
+- **Cards are denser** (196px → 150px) and descriptions are capped at two lines
+  rather than hiding in a scroll region with no affordance.
+- **A source rail** — a 2px bar in the tab's own colour down the leading edge,
+  plus a matching tint on the app-icon fallback. A list is scannable by colour
+  before a word is read.
+- **The settings button is the shell's own `PanelActionButton` again.** It was
+  a hand-rolled 22x20 `Rectangle` — not square, so the corner radius rendered
+  as a squashed oval — wrapped around a second `Rectangle` doing duty as a glow
+  ring. The shell already ships the right component: square, borderless, proper
+  hover fill, tooltip, focus ring.
+- **The toolbar label is no longer a headline.** "Find App" was bold at 13px in
+  a 26px pill, which reads as a title in a status bar. It is now caption-sized,
+  unbold, tinted to the foreground and paired with a 16px icon chip.
+- **The panel's mark is a magnifying glass**, not a package box. The box was a
+  guess at "app store"; the search frame it actually is now matches the icon in
+  the bar that opens it.
+- **Two toolbar designs instead of six.** `outline` / `soft` / `bold` /
+  `minimal` were the same pill at different alphas; asking someone to choose
+  between four greys is not a decision they should have to make. Retired
+  values are normalised onto the default on load, so an existing settings file
+  cannot leave the bar unstyled.
+
 ## [1.1.0] — unreleased
 
 Three passes of work on the panel, the backends and the repository itself.

@@ -58,6 +58,57 @@ Panel {
   // Highlight colour for the matched run in a card title.
   readonly property string matchColor: String(Color.accent)
 
+  // --------------------------------------------------------------- icon set
+  // One glyph per concept, one place. Every codepoint below was read out of the
+  // font this machine actually resolves `monospace` to (JetBrainsMono Nerd
+  // Font), not copied off the Nerd Fonts website — the glyphs are the
+  // Material Design (`md-*`) set, which is what the shell's own menu draws, so
+  // FossFetch and the launcher it sits next to share one icon language.
+  //
+  // Written as explicit surrogate pairs on purpose. JavaScript's `\uXXXX`
+  // escape is exactly four hex digits, so `\uF0349` silently parses as `\uF034`
+  // followed by a literal "9" — the classic way a Nerd Font icon turns into
+  // tofu without anything reporting an error.
+  //
+  // Previously these were raw Font Awesome codepoints, which is how the search
+  // field came to be drawing a BOOKMARK.
+  readonly property var icons: ({
+    // name        glyph  (Material Design set, read out of the installed font)
+    search     : "\uDB80\uDF49",  // U+F0349 magnify
+    settings   : "\uDB82\uDCBB",  // U+F08BB cog-outline
+    close      : "\uDB80\uDD56",  // U+F0156 close
+    check      : "\uDB80\uDD2C",  // U+F012C check
+    checkCircle: "\uDB81\uDDE1",  // U+F05E1 check-circle-outline
+    box        : "\uDB80\uDFD7",  // U+F03D7 package-variant-closed
+    info       : "\uDB80\uDEFD",  // U+F02FD information-outline
+    external   : "\uDB80\uDFCC",  // U+F03CC open-in-new
+    download   : "\uDB80\uDDDA",  // U+F01DA download
+    trash      : "\uDB82\uDE7A",  // U+F0A7A trash-can-outline
+    history    : "\uDB80\uDEDA",  // U+F02DA history
+    warning    : "\uDB81\uDDD6",  // U+F05D6 alert-circle-outline
+    shield     : "\uDB83\uDCC8",  // U+F0CC8 shield-check-outline
+    clock      : "\uDB80\uDD50",  // U+F0150 clock-outline
+    cube       : "\uDB80\uDDA7",  // U+F01A7 cube-outline
+    branch     : "\uDB81\uDE2C",  // U+F062C source-branch
+  })
+
+  // Every icon in the panel goes through this component so family, optical
+  // size and tint cannot drift per call-site. Sizes come from the shell's
+  // font scale, so icons track the user's text size like everything else does.
+  component Icon: Text {
+    property real iconSize: Style.font.body
+    property real tint: 1.0
+    font.family: Style.font.resolvedFamily
+    font.pixelSize: iconSize
+    textFormat: Text.PlainText
+    // PUA glyphs have no meaningful advance width; centring on the layout box
+    // (not the glyph) is what keeps a row of icons optically aligned instead
+    // of each one drifting on its own side bearing.
+    horizontalAlignment: Text.AlignHCenter
+    verticalAlignment: Text.AlignVCenter
+    color: Util.alpha(Color.popups.text, tint)
+  }
+
   FileView {
     path: Color.home + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
@@ -160,7 +211,15 @@ Panel {
   // current | outline | soft | bold | minimal | icon. The panel itself keeps
   // its stock look; this setting is pushed to the BarWidget so the button in
   // the bar restyles itself live.
-  property string panelDesign: "current"
+  // See BarWidget.qml: "pill" (default) or "icon". The six-way picker that
+  // used to live in Settings is gone; those styles are normalised onto "pill"
+  // on load so an existing settings file can't leave the bar unstyled.
+  readonly property var designs: ["pill", "icon"]
+  property string panelDesign: "pill"
+
+  function normalizeDesign(d) {
+    return root.designs.indexOf(d) !== -1 ? d : "pill"
+  }
 
   readonly property string appstreamStateScript: Qt.resolvedUrl("./appstream_state.py").toString().replace("file://", "")
   readonly property string optionsFilePath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
@@ -185,9 +244,7 @@ Panel {
   }
 
   function setPanelDesign(d) {
-    var valid = ["current", "outline", "soft", "bold", "minimal", "icon"]
-    if (valid.indexOf(d) === -1) return
-    root.panelDesign = d
+    root.panelDesign = root.normalizeDesign(d)
     root.persistOptions()
     if (root.hostWidget && root.hostWidget.setToolbarDesign)
       root.hostWidget.setToolbarDesign(d)
@@ -253,7 +310,7 @@ Panel {
         if (typeof data.all === "boolean") root.allEnabled = data.all
         if (data.aurHelper === "yay" || data.aurHelper === "paru") root.aurHelper = data.aurHelper
         if (typeof data.showCoffee === "boolean") root.showCoffeeButton = data.showCoffee
-        if (["current", "outline", "soft", "bold", "minimal", "icon"].indexOf(data.design) !== -1) root.panelDesign = data.design
+        root.panelDesign = root.normalizeDesign(data.design)
         if (Array.isArray(data.recentSearches)) {
           // Defensive: the file is user-writable, so treat every entry as
           // untrusted input and keep only short plain strings.
@@ -292,6 +349,15 @@ Panel {
     // Re-assert focus WITHOUT selecting the text: the query carries across tabs,
     // and selectAll() here would wipe the search the moment you pressed Tab.
     refocus()
+  }
+
+  // The hero subtitle spells the source out in full; a 180px-wide segment
+  // cannot. "Pacman / AUR / Flatpak" reads fine, "Arch repos (Pacman)" does not.
+  function shortTabLabel(t) {
+    if (t === 0) return "Pacman"
+    if (t === 1) return "Flatpak"
+    if (t === 2) return "AUR"
+    return "All"
   }
 
   function tabLabel() {
@@ -350,7 +416,7 @@ Panel {
   // can't overlap the bottom of the bar / off-screen. The ListView scrolls
   // internally when there are more matches than fit.
   // Fixed card height so exactly 3 result cards are on screen at a time.
-  readonly property real cardHeight: Style.space(196)
+  readonly property real cardHeight: Style.space(150)
   function fitResultsHeight(count) {
     if (count <= 0) return Style.space(120)
     var spacing = Style.space(8)
@@ -405,23 +471,51 @@ Panel {
     return Util.alpha(Color.popups.text, 0.55)
   }
 
+  // The row's primary source. Drives the card's colour rail and its fallback
+  // icon tint, so a list is scannable by colour before a single word is read.
+  function rowSource(e) {
+    if (!e) return "none"
+    if (root.isPacman && e.pacmanPkg !== "") return "pacman"
+    if (root.isAur && e.aurPkg !== "") return "aur"
+    if (root.isFlatpak && e.flatpakPkg !== "") return "flatpak"
+    if (root.isAll) {
+      if (e.pacmanPkg !== "") return "pacman"
+      if (e.aurPkg !== "") return "aur"
+      if (e.flatpakPkg !== "") return "flatpak"
+    }
+    return "none"
+  }
+
+  function rowSourceColor(e) {
+    var s = root.rowSource(e)
+    if (s === "pacman") return root.pacmanColor
+    if (s === "aur") return root.aurColor
+    if (s === "flatpak") return root.flatpakColor
+    return "transparent"
+  }
+
+  // One chip list for the whole card. The bottom row used to hold "Updated",
+  // the download size and the trust signal side by side with the install
+  // buttons, and "Updated" was always the one that lost - it got squeezed to
+  // "Updated: 28 …".
+  function cardChips(e) {
+    var chips = root.detailPoints(e)
+    var when = root.fmtUpdated((e && e.updated) || "")
+    if (when !== "") chips.push({ label: "Updated", value: when })
+    return chips
+  }
+
   function detailPoints(e) {
     var v = String((e && e.version) || "").trim()
     var r = String((e && e.repo) || "").trim()
     var a = String((e && e.arch) || "").trim()
     var l = String((e && e.licenses) || "").trim()
 
-    var line1 = []
-    if (v !== "") line1.push("Version: " + v)
-    if (r !== "") line1.push("Repo: " + r)
-
-    var line2 = []
-    if (a !== "") line2.push("Arch: " + a)
-    if (l !== "") line2.push("License: " + l)
-
     var pts = []
-    if (line1.length) pts.push(line1.join("  ·  "))
-    if (line2.length) pts.push(line2.join("  ·  "))
+    if (v !== "") pts.push({ label: "Version", value: v })
+    if (r !== "") pts.push({ label: "Repo", value: r })
+    if (a !== "") pts.push({ label: "Arch", value: a })
+    if (l !== "") pts.push({ label: "License", value: l })
     return pts
   }
 
@@ -2025,115 +2119,108 @@ Panel {
           meta: root.tabCaption()
           fontFamily: Style.font.family
           iconComponent: Component {
-            Text {
-              text: "\uf002"
+            Icon {
+              text: root.icons.search
               color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.title
+              // PanelHero declares `iconSize: Style.font.display` but never
+              // applies it to the loader, so the mark takes its size from here.
+              // 24px against a 14px title — a confident hero, not a caption
+              // that happens to sit next to a wordmark.
+              iconSize: Style.font.display
             }
           }
           trailingControl: Component {
-            Rectangle {
-              id: optionsBtn
-              // implicitWidth/Height, NOT Layout.preferred*: PanelHero loads this
-              // through a plain Loader, so its parent is an Item, not a Layout —
-              // Layout attached properties are ignored there and the rectangle
-              // collapses to zero size, leaving its MouseArea unclickable.
-              implicitWidth: Style.space(22)
-              implicitHeight: Style.space(20)
-              radius: Style.cornerRadius
-              color: root.showOptions
-                ? Style.selectedFillFor(Color.popups.text, Color.accent)
-                : (optionsMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
-              border.width: Style.controlBorderWidth(false, optionsMouse.containsMouse)
-              border.color: Style.controlBorder(false, optionsMouse.containsMouse, Color.popups.text, Color.accent)
-              Behavior on border.color { ColorAnimation { duration: 150 } }
-
-              Rectangle {
-                anchors.fill: parent
-                radius: Style.cornerRadius
-                color: "transparent"
-                border.color: Util.alpha(Color.accent, 0.6)
-                border.width: 2
-                opacity: optionsMouse.containsMouse ? 0.7 : 0
-                Behavior on opacity { NumberAnimation { duration: 180 } }
-              }
-
-              Text {
-                anchors.centerIn: parent
-                text: root.showOptions ? "\uf00d" : "\uf013"
-                color: root.showOptions || optionsMouse.containsMouse ? Color.accent : Color.popups.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                Behavior on color { ColorAnimation { duration: 150 } }
-              }
-
-              MouseArea {
-                id: optionsMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.showOptions = !root.showOptions
-              }
+            PanelActionButton {
+              iconText: root.showOptions ? root.icons.close : root.icons.settings
+              tooltipText: root.showOptions ? "Close settings" : "Settings"
+              foreground: Color.popups.text
+              fontFamily: Style.font.resolvedFamily
+              fontSize: Style.font.body
+              focusable: false
+              onClicked: root.showOptions = !root.showOptions
             }
           }
         }
 
         // -------------------------------------------------------------- tabs
+        // One segmented control, not three bordered pills. The old layout drew
+        // an outline around every tab, which put the same weight on "Pacman",
+        // "AUR" and "Flatpak" and left the active one reading as "also
+        // selected" rather than "selected". A single track with hairline
+        // dividers and one filled segment puts the hierarchy back.
         Item {
+          id: tabBar
           width: parent.width
-          implicitHeight: Style.space(34)
+          implicitHeight: Style.space(32)
 
-          RowLayout {
-            id: tabRow
+          readonly property int tabs: root.visibleTabs().length
+
+          Rectangle {
+            id: tabTrack
             anchors.fill: parent
-            spacing: Style.spacing.lg
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.popups.text, 0.05)
+            border.width: Style.spacing.hairline
+            border.color: Util.alpha(Color.popups.text, 0.12)
 
-            TabButton {
-              id: pacmanTabBtn
-              text: "Pacman"
-              active: root.activeTab === 0
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              Layout.preferredWidth: 1
-              Layout.minimumWidth: 0
-              onClicked: root.switchTab(0)
-            }
+            Row {
+              id: tabRow
+              anchors.fill: parent
+              anchors.margins: Style.spacing.hairline
 
-            TabButton {
-              id: aurTabBtn
-              text: "AUR"
-              active: root.activeTab === 2
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              Layout.preferredWidth: 1
-              Layout.minimumWidth: 0
-              visible: root.aurEnabled
-              onClicked: root.switchTab(2)
-            }
+              Repeater {
+                model: root.visibleTabs()
 
-            TabButton {
-              id: flatpakTabBtn
-              text: "Flatpak"
-              active: root.activeTab === 1
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              Layout.preferredWidth: 1
-              Layout.minimumWidth: 0
-              visible: root.flatpakEnabled
-              onClicked: root.switchTab(1)
-            }
+                delegate: Item {
+                  id: segment
+                  required property int modelData
+                  readonly property bool active: root.activeTab === modelData
+                  readonly property bool last: segment.index === tabBar.tabs - 1
 
-            TabButton {
-              id: allTabBtn
-              text: "All"
-              active: root.activeTab === 3
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              Layout.preferredWidth: 1
-              Layout.minimumWidth: 0
-              visible: root.allEnabled && root.visibleTabs().length > 3
-              onClicked: root.switchTab(3)
+                  width: tabRow.width / Math.max(1, tabBar.tabs)
+                  height: tabRow.height
+
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Math.max(0, Style.cornerRadius - Style.spacing.hairline)
+                    color: segment.active
+                      ? Util.alpha(Color.accent, 0.20)
+                      : (segmentMouse.containsMouse ? Util.alpha(Color.popups.text, 0.07) : "transparent")
+
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                  }
+
+                  // Hairline between segments, but never at either end - an
+                  // internal divider is what makes the track read as one
+                  // control rather than a row of buttons.
+                  Rectangle {
+                    visible: !segment.last
+                    anchors.right: parent.right
+                    width: Style.spacing.hairline
+                    height: parent.height - Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Util.alpha(Color.popups.text, 0.12)
+                  }
+
+                  Text {
+                    anchors.centerIn: parent
+                    text: root.shortTabLabel(modelData)
+                    color: segment.active ? Color.accent : Color.popups.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: segment.active
+                    textFormat: Text.PlainText
+                  }
+
+                  MouseArea {
+                    id: segmentMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.switchTab(modelData)
+                  }
+                }
+              }
             }
           }
         }
@@ -2246,38 +2333,14 @@ Panel {
                 spacing: Style.spacing.sm
 
                 HelperPill {
-                  glyph: "\u25AA"
-                  label: "Current"
-                  selected: root.panelDesign === "current"
-                  onClicked: root.setPanelDesign("current")
+                  glyph: root.icons.box
+                  label: "Button"
+                  selected: root.panelDesign === "pill"
+                  onClicked: root.setPanelDesign("pill")
                 }
                 HelperPill {
-                  glyph: "\u25A1"
-                  label: "Outline"
-                  selected: root.panelDesign === "outline"
-                  onClicked: root.setPanelDesign("outline")
-                }
-                HelperPill {
-                  glyph: "\u25CF"
-                  label: "Soft"
-                  selected: root.panelDesign === "soft"
-                  onClicked: root.setPanelDesign("soft")
-                }
-                HelperPill {
-                  glyph: "\u25A0"
-                  label: "Bold"
-                  selected: root.panelDesign === "bold"
-                  onClicked: root.setPanelDesign("bold")
-                }
-                HelperPill {
-                  glyph: "\u25CB"
-                  label: "Minimal"
-                  selected: root.panelDesign === "minimal"
-                  onClicked: root.setPanelDesign("minimal")
-                }
-                HelperPill {
-                  glyph: "\uf00e"
-                  label: "Icon"
+                  glyph: root.icons.search
+                  label: "Icon only"
                   selected: root.panelDesign === "icon"
                   onClicked: root.setPanelDesign("icon")
                 }
@@ -2313,13 +2376,12 @@ Panel {
                 border.color: Style.controlBorder(root.showCoffeeButton, coffeeBoxMouse.containsMouse, Color.popups.text, Color.accent)
                 Behavior on border.color { ColorAnimation { duration: 150 } }
 
-                Text {
-                  anchors.centerIn: parent
-                  text: "\uf00c"
-                  color: root.showCoffeeButton ? Color.accent : "transparent"
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
+Icon {
+                    anchors.centerIn: parent
+                    text: root.icons.check
+                    color: root.showCoffeeButton ? Color.accent : "transparent"
+                    iconSize: Style.font.bodySmall
+                  }
 
                 MouseArea {
                   id: coffeeBoxMouse
@@ -2400,17 +2462,15 @@ Panel {
               Behavior on opacity { NumberAnimation { duration: 180 } }
             }
 
-            Text {
+            Icon {
               id: icon
-              text: "\uf002"
+              text: root.icons.search
               color: Util.alpha(Color.popups.text, 0.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.title
+              iconSize: Style.font.title
               anchors.left: parent.left
               anchors.leftMargin: Style.spacing.xxl
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(22)
-              horizontalAlignment: Text.AlignHCenter
             }
 
             TextField {
@@ -2568,6 +2628,21 @@ Panel {
               border.width: isSelected ? Border.uniformWidth(root.selectedBorderSpec) : 0
               border.color: isSelected ? Border.color(root.selectedBorderSpec) : "transparent"
 
+              // Source rail: a 2px bar in the tab's own colour. Scannable
+              // before a single word is read, and it costs the card two pixels
+              // of width rather than another outline.
+              Rectangle {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.spacing.xxs
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(2)
+                height: parent.height - Style.space(18)
+                radius: width / 2
+                color: root.rowSourceColor(delegateRoot)
+                opacity: isSelected || isHovered ? 1 : 0.55
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+              }
+
               // Soft accent ring around the selected card — a nested overlay so
               // it draws on top of the fill but beneath the row content.
               Rectangle {
@@ -2593,18 +2668,19 @@ Panel {
                   Layout.alignment: Qt.AlignTop
                   Layout.topMargin: Style.spacing.xxs
 
+                  // No border. A 1px outline around every app icon, on top of
+                  // the outline the card already had, was most of the "form
+                  // field" texture; the tinted tile carries the shape on its own.
                   Rectangle {
                     anchors.fill: parent
                     radius: Style.cornerRadius
-                    color: Util.alpha(Color.popups.text, 0.06)
-                    border.width: Style.spacing.hairline
-                    border.color: Util.alpha(Color.popups.text, 0.18)
+                    color: Util.alpha(root.rowSourceColor(delegateRoot), 0.14)
                   }
 
                   Text {
                     anchors.centerIn: parent
                     text: delegateRoot.name.charAt(0).toUpperCase()
-                    color: Util.alpha(Color.popups.text, 0.4)
+                    color: Util.alpha(root.rowSourceColor(delegateRoot), 0.85)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.icon
                     font.bold: true
@@ -2658,11 +2734,19 @@ Panel {
                       id: detailsButton
                       visible: true
                       focusable: false
-                      text: "Details"
-                      foreground: Util.alpha(Color.popups.text, 0.7)
-                      fontFamily: Style.font.family
+                      text: ""
+                      iconText: root.icons.info
+                      // Nerd Font, not the UI font: the shell's Button renders
+                      // iconText with whatever family it is handed, and a
+                      // Material Design glyph drawn in a text face is tofu.
+                      fontFamily: Style.font.resolvedFamily
+                      // One step below the label size: icons set to the same
+                      // size as text always look like a sticker on top of it.
+                      iconSize: Style.font.caption - 1
+                      foreground: Util.alpha(Color.popups.text, 0.55)
                       fontSize: Style.font.caption
-                      bordered: true
+                      tooltipText: "Why this matched, and what it would install"
+                      bordered: false
                       Layout.preferredHeight: Style.space(24)
                       Layout.minimumWidth: 0
                       onClicked: root.openDetails(delegateRoot)
@@ -2672,81 +2756,62 @@ Panel {
                       id: webButton
                       visible: delegateRoot.website !== ""
                       focusable: false
-                      text: String(delegateRoot.website).indexOf("github") !== -1
-                        ? "GitHub ↗"
-                        : "Web ↗"
-                      foreground: root.pacmanColor
-                      fontFamily: Style.font.family
+                      text: ""
+                      iconText: root.icons.external
+                      fontFamily: Style.font.resolvedFamily
+                      iconSize: Style.font.caption - 1
+                      foreground: Util.alpha(root.pacmanColor, 0.75)
                       fontSize: Style.font.caption
-                      bordered: true
+                      tooltipText: String(delegateRoot.website).indexOf("github") !== -1
+                        ? "Open the GitHub project"
+                        : "Open the project website"
+                      bordered: false
                       Layout.preferredHeight: Style.space(24)
                       Layout.minimumWidth: 0
                       onClicked: { if (root.isSafeWebUrl(delegateRoot.website)) Qt.openUrlExternally(delegateRoot.website) }
                     }
                   }
 
-                  // Row 2: Description — auto-scrolls vertically when too long.
-                  // The bullets/install rows below need their own space, so the
-                  // description compresses (scrolling via its Flickable) rather
-                  // than overflowing the fixed card height.
-                  Item {
+                  // Row 2: Description, capped at two lines and elided.
+                  // The full text is one click away in the details sheet; a
+                  // three-line cut mid-sentence on every row is noise, and a
+                  // scrollable description inside a list row is worse.
+                  Text {
+                    id: cardDescription
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.minimumHeight: Style.space(6)
-                    clip: true
-
-                    Flickable {
-                      id: descFlick
-                      anchors.fill: parent
-                      contentWidth: width
-                      contentHeight: descText.implicitHeight
-                      clip: true
-                      boundsBehavior: Flickable.StopAtBounds
-                      flickableDirection: Flickable.VerticalFlick
-                      interactive: contentHeight > height
-
-                      Text {
-                        id: descText
-                        width: descFlick.width
-                        text: delegateRoot.description || ""
-                        color: Util.alpha(Color.popups.text, 0.62)
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        textFormat: Text.PlainText
-                        wrapMode: Text.WordWrap
-                      }
-                    }
+                    Layout.minimumWidth: 0
+                    text: delegateRoot.description || ""
+                    color: Util.alpha(Color.popups.text, 0.6)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignTop
                   }
 
-                  // Row 3: Version / repo / arch / license — compact labeled
-                  // headings directly below the description.
-                  Text {
+                  // Row 3: metadata as chips. Each one sizes to its own
+                  // content, so a long licence wraps onto the next row instead
+                  // of being elided to "extra…" the way a single shared text
+                  // line always did.
+                  Flow {
                     Layout.fillWidth: true
                     Layout.topMargin: Style.spacing.xxs
-                    visible: root.detailPoints(delegateRoot).length > 0
-                    // Long license/value text must be allowed to shrink (and
-                    // elide) — otherwise its implicit width forces the whole
-                    // card row wider than the popup and the description wraps
-                    // at the wrong width, clipping mid-word at the card edge.
                     Layout.minimumWidth: 0
-                    // Hard-cap the height so it can never overflow the fixed
-                    // card height (in this runtime implicitHeight is computed
-                    // pathologically large, which would otherwise blow up the
-                    // ColumnLayout, squash the description and push the install
-                    // buttons off the bottom of the card).
-                    Layout.preferredHeight: Style.space(44)
-                    Layout.maximumHeight: Style.space(44)
-                    Layout.minimumHeight: Style.space(22)
-                    clip: true
-                    color: Util.alpha(Color.popups.text, 0.78)
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    lineHeight: Style.space(20)
-                    text: root.detailPoints(delegateRoot).join("\n")
-                    textFormat: Text.PlainText
-                    wrapMode: Text.NoWrap
-                    elide: Text.ElideRight
+                    spacing: Style.spacing.xs
+
+                    Repeater {
+                      model: root.cardChips(delegateRoot)
+
+                      delegate: MetaChip {
+                        required property var modelData
+                        label: modelData.label
+                        value: modelData.value
+                      }
+                    }
                   }
 
                   // Row 4: Install buttons (bottom-right of the card)
@@ -2755,33 +2820,17 @@ Panel {
                     Layout.topMargin: Style.spacing.xxs
                     spacing: Style.spacing.lg
 
-                    // "Last updated" date in the bottom-left of the card, away
-                    // from the install buttons on the right. Empty when the row
-                    // has no release/build-date info yet.
-                    Text {
-                      Layout.minimumWidth: 0
-                      Layout.fillWidth: true
-                      Layout.alignment: Qt.AlignVCenter
-                      visible: root.fmtUpdated(delegateRoot.updated) !== ""
-                      text: "Updated: " + root.fmtUpdated(delegateRoot.updated)
-                      color: Util.alpha(Color.popups.text, 0.55)
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.caption
-                      textFormat: Text.PlainText
-                      elide: Text.ElideRight
-                      wrapMode: Text.NoWrap
-                    }
-
                     // Download size for the distro package — the one number
                     // people actually weigh before installing.
                     Text {
                       Layout.alignment: Qt.AlignVCenter
                       visible: delegateRoot.downloadSize !== ""
-                      text: "⤓ " + delegateRoot.downloadSize
+                      text: delegateRoot.downloadSize
                       color: Util.alpha(Color.popups.text, 0.55)
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                       textFormat: Text.PlainText
+                      Layout.leftMargin: Style.spacing.xs
                     }
 
                     // AUR trust signal: flagged out of date, or so thinly
@@ -2799,17 +2848,26 @@ Panel {
 
                     // Already on the machine — said plainly, so a re-install is
                     // never a surprise.
-                    Text {
+                    RowLayout {
                       Layout.alignment: Qt.AlignVCenter
+                      spacing: Style.spacing.sm
                       visible: delegateRoot.installedPacman === "1"
                              || delegateRoot.installedAur === "1"
                              || delegateRoot.installedFlatpak === "1"
-                      text: "✓ Installed"
-                      color: root.pacmanColor
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.caption
-                      font.bold: true
-                      textFormat: Text.PlainText
+
+                      Icon {
+                        text: root.icons.check
+                        color: root.pacmanColor
+                        iconSize: Style.font.caption
+                      }
+                      Text {
+                        text: "Installed"
+                        color: root.pacmanColor
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        textFormat: Text.PlainText
+                      }
                     }
 
                     // Flexible spacer pushes the install buttons to the right.
@@ -2920,21 +2978,23 @@ Panel {
                   implicitWidth: recentText.implicitWidth + Style.space(16)
                   implicitHeight: Style.space(24)
                   radius: Style.cornerRadius
+                  // Borderless at rest. These are shortcuts, not actions -
+                  // eight permanent outlines in the empty state was most of
+                  // the "beginner" texture of the panel.
                   color: recentChipMouse.containsMouse
-                    ? Util.alpha(Color.popups.text, 0.10)
-                    : Util.alpha(Color.popups.text, 0.05)
-                  border.width: Style.spacing.hairline
-                  border.color: Util.alpha(Color.popups.text, 0.15)
+                    ? Util.alpha(Color.popups.text, 0.11)
+                    : Util.alpha(Color.popups.text, 0.045)
                   Behavior on color { ColorAnimation { duration: 120 } }
 
                   Text {
                     id: recentText
                     anchors.centerIn: parent
                     text: modelData
-                    color: Color.popups.text
+                    color: recentChipMouse.containsMouse ? Color.accent : Color.popups.text
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                     textFormat: Text.PlainText
+                    Behavior on color { ColorAnimation { duration: 120 } }
                   }
 
                   MouseArea {
@@ -3204,58 +3264,45 @@ Panel {
     }
   }
 
-  component TabButton: Item {
-    id: tabRoot
-    property string text: ""
-    property bool active: false
-    signal clicked()
+  // Label and value on one line, sized to whatever they actually are. This is
+  // the component that makes "Repo: extra…" impossible: a chip cannot be
+  // squeezed, it wraps onto the next row instead.
+  component MetaChip: Rectangle {
+    id: chip
+    property string label: ""
+    property string value: ""
 
-    implicitWidth: lab.implicitWidth + Style.space(22)
-    implicitHeight: Style.space(32)
+    implicitHeight: Style.space(20)
+    implicitWidth: chipRow.implicitWidth + Style.space(10)
+    radius: Math.max(2, Style.cornerRadius - Style.space(1))
+    color: Util.alpha(Color.popups.text, 0.055)
 
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: active
-        ? Style.selectedFillFor(Color.popups.text, Color.accent)
-        : (tabMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent")
-      border.width: Style.controlBorderWidth(false, tabMouse.containsMouse)
-      border.color: Style.controlBorder(false, tabMouse.containsMouse, Color.popups.text, Color.accent)
-
-      // Soft outer glow that fades in on hover (and stays lit while active),
-      // matching the toolbar icon's hover ring.
-Rectangle {
-        anchors.fill: parent
-        radius: Style.cornerRadius
-        color: "transparent"
-        border.color: Util.alpha(Color.accent, 0.6)
-        border.width: 2
-        opacity: tabMouse.containsMouse ? 0.7 : 0
-        Behavior on opacity { NumberAnimation { duration: 180 } }
-      }
+    Row {
+      id: chipRow
+      anchors.centerIn: parent
+      spacing: Style.spacing.xs
 
       Text {
-        id: lab
-        anchors.centerIn: parent
-        text: tabRoot.text
-        color: active ? Color.accent : Color.popups.text
+        text: chip.label
+        color: Util.alpha(Color.popups.text, 0.42)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
-        font.bold: active
+        font.letterSpacing: 0.4
         textFormat: Text.PlainText
+        anchors.bottom: parent.bottom
       }
-    }
-
-    MouseArea {
-      id: tabMouse
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: tabRoot.clicked()
+      Text {
+        text: chip.value
+        color: Util.alpha(Color.popups.text, 0.82)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        textFormat: Text.PlainText
+        anchors.bottom: parent.bottom
+      }
     }
   }
 
-  //                                                         small install button
   component HelperPill: Rectangle {
     id: pill
     property string label: ""
@@ -3276,14 +3323,14 @@ Rectangle {
       anchors.centerIn: parent
       spacing: Style.spacing.sm
 
-      Text {
+      Icon {
         text: pill.glyph
         visible: pill.glyph !== ""
         color: pill.selected ? Color.accent : Color.popups.text
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        font.bold: pill.selected
-        textFormat: Text.PlainText
+        iconSize: Style.font.caption
+        Layout.preferredWidth: pill.glyph !== "" ? Style.space(12) : 0
+        Layout.alignment: Qt.AlignVCenter
+        Behavior on color { ColorAnimation { duration: 120 } }
       }
       Text {
         id: pillLab
@@ -3327,7 +3374,7 @@ Rectangle {
     // Fixed-width pill: labels self-size and FitText shrinks the font to fit,
     // so a long AUR package name can never shove the button past the card edge
     // or inflate the row's minimum width.
-    implicitWidth: Style.space(120)
+    implicitWidth: Style.space(118)
     implicitHeight: Style.space(26)
 
     function label() {
@@ -3350,35 +3397,31 @@ Rectangle {
     Rectangle {
       anchors.fill: parent
       radius: Style.cornerRadius
+      // The one filled control on the card. Install/Remove is what the user
+      // came here to do; Details and Web are lookups. Giving all three the same
+      // outline is what made the card read as three equal buttons.
       color: btn.isPending
-        ? Util.alpha(root.confirmColor, 0.22)
+        ? Util.alpha(root.confirmColor, 0.28)
         : !btn.actionable
           ? Util.alpha(Color.popups.text, 0.04)
-          : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.2) : Util.alpha(Color.popups.text, 0.06))
+          : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.32) : Util.alpha(btn.branchColor(), 0.16))
       border.width: Style.spacing.hairline
       border.color: btn.isPending
         ? root.confirmColor
-        : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.8) : Util.alpha(btn.branchColor(), 0.45))
+        : (mouse.containsMouse ? Util.alpha(btn.branchColor(), 0.9) : Util.alpha(btn.branchColor(), 0.55))
 
       Behavior on border.color { ColorAnimation { duration: 150 } }
 
-      // Soft outer glow that fades in on hover (and stays lit while armed),
-      // matching the toolbar icon's glow ring.
-      Rectangle {
-        anchors.fill: parent
-        anchors.margins: -Style.space(1)
-        radius: Style.cornerRadius + Style.space(1)
-        color: "transparent"
-        border.color: Util.alpha(btn.branchColor(), 0.5)
-        border.width: 1.5
-        opacity: (btn.isPending || mouse.containsMouse) ? 0.85 : 0
-        Behavior on opacity { NumberAnimation { duration: 180 } }
-      }
-
+      // Icon + label, with the label still free to shrink. A download arrow on
+      // install and a bin on remove means the two states of this one control no
+      // longer differ by a word alone.
+      // No glyph. The label already says "Remove" or "pacman (gimp)", and a
+      // 10px pictogram beside 10px text in a 26px pill turned into visual mud.
+      // Weight comes from the fill and the source colour instead.
       FitText {
         id: label
         anchors.fill: parent
-        anchors.margins: Style.spacing.sm
+        anchors.margins: Style.spacing.xs
         text: btn.label()
         color: btn.isPending ? root.confirmColor
           : !btn.actionable ? Util.alpha(btn.branchColor(), 0.8)

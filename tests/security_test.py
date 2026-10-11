@@ -788,7 +788,10 @@ class FossFetchTests(unittest.TestCase):
         # Default off, and the tab is only offered when it was switched on.
         self.assertIn("property bool allEnabled: false", src)
         self.assertIn("if (root.allEnabled && list.length > 2) list.push(3)", src)
-        self.assertIn("visible: root.allEnabled && root.visibleTabs().length > 3", src)
+        # The segmented control renders visibleTabs() directly, so that list is
+        # now the single place the All tab can be shown from - one source of
+        # truth, rather than a second visibility test that could disagree.
+        self.assertIn("model: root.visibleTabs()", src)
         # Exactly three live backends remain.
         for keep in ("isPacman", "isFlatpak", "isAur"):
             self.assertIn("readonly property bool %s" % keep, src)
@@ -823,7 +826,11 @@ class FossFetchTests(unittest.TestCase):
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()
         # The tick still reports installed state for all three sources.
-        self.assertIn('text: "✓ Installed"', src)
+        self.assertIn('text: "Installed"', src)
+        # The tick is a glyph in the shared icon map now, not a literal in the
+        # card. It still has to come from that map or it silently reverts to a
+        # font the text face may not have.
+        self.assertIn("text: root.icons.check", src)
         self.assertIn('delegateRoot.installedPacman === "1"', src)
         self.assertIn('delegateRoot.installedAur === "1"', src)
         self.assertIn('delegateRoot.installedFlatpak === "1"', src)
@@ -986,8 +993,8 @@ class FossFetchTests(unittest.TestCase):
         # specific sinks that receive remote data rather than a global count,
         # so an unrelated refactor cannot silently change the guarantee.
         for probe in (
-            'id: descText',        # package description
-            'root.detailPoints(',  # version/repo/arch/license
+            'id: cardDescription',  # package description
+            'root.detailPoints(',   # version/repo/arch/license
             'FitText: Text {',     # component base (name + install labels)
         ):
             self.assertIn(probe, src)
