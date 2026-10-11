@@ -74,8 +74,21 @@ jobs:
         run: |
           set -euo pipefail
           tools/update_pins.sh bump "${{ steps.probe.outputs.upstream }}"
+          # `bump` deliberately writes appstream_pins.sh.generated and leaves the
+          # committed file alone (so a local run cannot silently move the trust
+          # anchor). The workflow has to promote that file explicitly — without
+          # this the subsequent `verify` re-checks the OLD pin, reports "Already
+          # up to date", and create-pull-request finds no diff and opens no PR
+          # while still reporting the job as green.
+          if [ ! -s appstream_pins.sh.generated ]; then
+            echo "::error::bump did not produce appstream_pins.sh.generated"
+            exit 1
+          fi
+          mv appstream_pins.sh.generated appstream_pins.sh
+
           # Prove the regenerated hashes match the artifacts actually published,
-          # so the PR cannot contain a checksum that was never checked.
+          # so the PR cannot contain a checksum that was never checked. This
+          # now runs against the NEW pin, which is the entire point.
           tools/update_pins.sh verify
 
       - name: Open the bump pull request
