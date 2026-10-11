@@ -29,12 +29,25 @@ its curated catalogue was too thin to be worth the fourth tab. The remaining
   Installing keeps the quick two-click arm on purpose: ConfirmDialog hardcodes
   `destructive: index === 1`, so its second button always renders in the danger
   colour — correct for "Remove", actively misleading for "Install".
-- **Details sheet** — dependency graph, installed size, provides/conflicts, and
-  a plain-language explanation of *why* the row matched (exact, prefix,
-  substring, punctuation-insensitive, fuzzy, or natural-language category).
-  "Required by" is fetched lazily from `pacman -Qi` only for installed rows,
-  because it is the field that tells you whether removing a package would break
-  something else — and `pacman -Si` does not report it at all.
+- **Details sheet** for every source, not just Pacman. Dependency graph,
+  sizes, provides/conflicts and a plain-language explanation of *why* the row
+  matched (exact, prefix, substring, punctuation-insensitive, fuzzy, or
+  natural-language category). Previously AUR and Flathub rows rendered almost
+  empty, because the shared `pacman -Si` batch only collects rows carrying a
+  pacman package — AUR and Flathub rows arrived with no metadata at all.
+  AUR details come from a new `aur_search.py info` subcommand (the RPC's
+  `search` interface returns only NameSearch fields — it has no Depends,
+  Conflicts, Provides, Groups or even License), and Flathub details from
+  `flatpak remote-info`, which adds Branch and Release. Both are fetched on
+  demand for the one package whose sheet you open, never per keystroke.
+  "Required by" is fetched lazily from `pacman -Qi` only for installed rows —
+  it is the field that tells you whether removing a package would break
+  something else, and `pacman -Si` does not report it at all.
+- **The sheet fits.** Long package lists are truncated to 8 with a
+  "+N more" count (mpv has 67 dependencies, which as one wrapped string took
+  over the whole sheet and pushed Conflicts and Required-by off-screen
+  entirely), the body scrolls, the header stays pinned, and the card is sized
+  to its content instead of clipping its last facts.
 - **Unit-tested panel logic.** Ranking, date formatting, URL allowlisting,
   cache-path containment, rich-text escaping, status-frame parsing, dependency
   parsing and match explanation now live in `Model.js` and are covered by 95

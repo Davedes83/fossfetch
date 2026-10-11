@@ -84,8 +84,88 @@ def clean_license(value):
     return ""
 
 
+def clean_list(value):
+    """Flatten an RPC field that may be a string, a list, or junk.
+
+    Every dependency field comes back as a Python list, and `str()` on that
+    leaks the repr — a sheet showing "['pacman>6.1', 'git']" instead of
+    "pacman>6.1, git". Non-string members are dropped rather than stringified.
+    """
+    if isinstance(value, str):
+        return cleanup(value)
+    if isinstance(value, (list, tuple)):
+        return cleanup(", ".join(v for v in value if isinstance(v, str)))
+    return ""
+
+
+def fetch_info(pkg):
+    """Full metadata for ONE package via the RPC's `info` interface.
+
+    `search` deliberately returns only NameSearch fields; Depends, Conflicts,
+    Provides, Groups and License are not in it. The details sheet needs them,
+    but only for the one package the user actually opened, so this is called
+    lazily rather than per keystroke.
+    """
+    base = os.environ.get("AUR_RPC_URL", "https://aur.archlinux.org/rpc/")
+    separator = "&" if "?" in base else "?"
+    url = (base + separator + "v=5&type=info&arg[]="
+           + urllib.parse.quote(pkg, safe=""))
+    req = urllib.request.Request(url, headers={"User-Agent": "fossfetch-grouping/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            declared = resp.headers.get("Content-Length")
+            if declared is not None:
+                try:
+                    if int(declared) > MAX_BYTES:
+                        return None
+                except ValueError:
+                    pass
+            data = bytearray()
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > MAX_BYTES:
+                    return None
+            return json.loads(bytes(data).decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def emit_info(pkg):
+    """Print the dependency/licence facts for one package as `I|<field>|<value>`."""
+    data = fetch_info(pkg)
+    if not isinstance(data, dict) or data.get("type") == "error":
+        print("STATUS|error|aur info unavailable")
+        return
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        print("STATUS|error|package not found in the AUR")
+        return
+    p = results[0]
+    if not isinstance(p, dict):
+        print("STATUS|error|response rejected (entry is not an object)")
+        return
+    fields = (
+        ("Version", "version"), ("License", "licenses"), ("Depends", "dependsOn"),
+        ("OptDepends", "optionalDeps"), ("Conflicts", "conflictsWith"),
+        ("Provides", "provides"), ("Groups", "groups"), ("URL", "website"),
+    )
+    for key, label in fields:
+        print("I|%s|%s" % (label, clean_list(p.get(key))))
+    print("STATUS|ok|info")
+
+
 def main():
     if len(sys.argv) < 2:
+        return
+    # `info <pkg>` — one package's full metadata, for the details sheet.
+    if sys.argv[1] == "info":
+        if len(sys.argv) < 3 or not sys.argv[2].strip():
+            print("STATUS|error|usage: aur_search.py info <package>")
+            return
+        emit_info(sys.argv[2].strip())
         return
     query = sys.argv[1]
     try:
@@ -138,6 +218,10 @@ def main():
             outofdate = str(int(outofdate)) if outofdate else ""
         except (TypeError, ValueError):
             outofdate = ""
+        # NOTE: the RPC's *search* interface does not return Depends, Conflicts,
+        # Provides, Groups or even License — only NameSearch does. Those facts
+        # are fetched on demand by the `info` subcommand when the details sheet
+        # is opened, rather than turning every keystroke into N extra requests.
         print("\t".join([name, desc, version, website, license_, pkgbase, votes,
                          lastmod, maintainer, outofdate]))
         count += 1

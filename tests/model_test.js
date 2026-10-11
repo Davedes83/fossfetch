@@ -188,6 +188,16 @@ eq(Model.depNames(null), [], "null yields no names");
 eq(Model.depNames("alsa-utils  at-spi2-core  audit"), ["alsa-utils", "at-spi2-core", "audit"],
    "a real Required By line splits into entries");
 eq(Model.depNames("foo  foo"), ["foo"], "a duplicate is not repeated");
+// The AUR info path emits comma-joined lists; the pacman path uses two spaces.
+eq(Model.depNames("pacman>6.1, git"), ["pacman>6.1", "git"],
+   "a comma-joined AUR dependency list splits into entries");
+eq(Model.depNames("sudo, doas"), ["sudo", "doas"],
+   "a comma-joined optional-deps list splits into entries");
+eq(Model.depNames("pacman>6.1,  git"), ["pacman>6.1", "git"],
+   "comma and double-space separators mix cleanly");
+// Version constraints are part of the name for AUR, where they are meaningful.
+eq(Model.depNames("glib2>=2.66, gcc"), ["glib2>=2.66", "gcc"],
+   "an AUR version constraint stays attached to its dependency");
 
 eq(Model.matchReasonFor("gimp", "gimp", false), "Exact name match", "exact match is explained");
 eq(Model.matchReasonFor("gimp2", "gimp", false), 'Name starts with "gimp"', "prefix match is explained");

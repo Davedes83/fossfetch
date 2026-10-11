@@ -901,6 +901,35 @@ class FossFetchTests(unittest.TestCase):
                          "conditional role assignments missing an else branch:\n  "
                          + "\n  ".join("%d: %s  [%s]" % b for b in bad))
 
+    def test_helpers_are_not_called_on_the_listmodel(self):
+        """Panel helpers live on `root`; ListModel only holds data.
+
+        `filteredModel.rowIndexForPkg(...)` parses and lints fine and throws at
+        runtime, so `Required By` silently never populated and the details sheet
+        showed no removal warning. Calls that need a panel helper must go
+        through root.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        helpers = set(re.findall(r"function (\w+)\(", src))
+        # filteredModel.<x>( ... ) is only ever legitimate for ListModel's own
+        # methods; anything else is a panel helper called on the wrong object.
+        model_methods = {"get", "set", "setProperty", "append", "clear",
+                         "move", "remove", "find", "count"}
+        bad = []
+        for m in re.finditer(r"filteredModel\.(\w+)\(", src):
+            name = m.group(1)
+            # ListModel's own methods are fine. Anything else reached for on
+            # filteredModel is a PANEL helper being called on the model, which
+            # is undefined at runtime.
+            if name in model_methods or name not in helpers:
+                continue
+            line = src[:m.start()].count("\n") + 1
+            bad.append("line %d: filteredModel.%s(...) is a root helper" % (line, name))
+        self.assertEqual(bad, [],
+                         "panel helpers must be called on root, not filteredModel:\n  "
+                         + "\n  ".join(bad))
+
     def test_qml_parses(self):
         """Panel.qml must have no QML syntax errors.
 

@@ -442,34 +442,55 @@ Panel {
 
   // The ordered fact list rendered by the sheet. Built as data (not markup)
   // so the view stays dumb and the labels/ordering live in one place.
+  // How a long package list is rendered. A package like mpv has 67
+  // dependencies; laid out as one wrapped string they take over the whole sheet
+  // and push Conflicts/Required by off the bottom entirely, so the facts that
+  // actually change a decision become unreachable.
+  readonly property int sheetDepLimit: 8
+
+  function joinDeps(field) {
+    var names = root.depNames(field)
+    if (names.length === 0) return ""
+    var shown = names.slice(0, root.sheetDepLimit)
+    var out = shown.join(", ")
+    if (names.length > shown.length)
+      out += "\n\n+" + (names.length - shown.length) + " more (open the AUR or `pacman -Qi` for the full list)"
+    return out
+  }
+
   function sheetFacts(r) {
     if (!r) return []
-    var d = root.depNames(r.dependsOn).length
+    var depList = root.depNames(r.dependsOn)
     var out = [
-      { label: "Source",   value: r.pacmanPkg !== "" ? "Arch repos — " + (r.repo || "pacman")
+      { label: "Source",   value: r.pacmanPkg !== "" ? "Arch repos \u2014 " + (r.repo || "pacman")
                             : (r.aurPkg !== "" ? "AUR"
-                            : (r.flatpakPkg !== "" ? "Flathub" : "")) },
+                            : (r.flatpakPkg !== ""
+                               ? "Flathub \u2014 " + (r.branch !== "" ? r.branch : "stable")
+                               : "")) },
       { label: "Version",  value: String(r.version || "") },
       { label: "Architecture", value: String(r.arch || "") },
+      { label: "Branch",  value: String(r.branch || "") },
+      { label: "Release", value: String(r.collection || "") },
       { label: "Licence",  value: String(r.licenses || "") },
       { label: "Groups",   value: String(r.groups || "") },
       { label: "Provides", value: String(r.provides || "") },
       { label: "Download size",  value: String(r.downloadSize || "") },
       { label: "Installed size", value: String(r.installedSize || "") },
-      { label: "Depends on (" + d + ")", value: String(r.dependsOn || "") },
-      { label: "Optional deps",  value: String(r.optionalDeps || "") },
-      { label: "Conflicts with", value: String(r.conflictsWith || "") }
+      { label: "Depends on (" + depList.length + ")", value: root.joinDeps(r.dependsOn) },
+      { label: "Optional deps",  value: root.joinDeps(r.optionalDeps) },
+      { label: "Conflicts with", value: root.joinDeps(r.conflictsWith) }
     ]
     // Only for an installed pacman/AUR row, and only once `pacman -Qi` has
-    // answered — this is the warning that removal would break another package.
-    var req = String(r.requiredBy || "")
-    if (req !== "" && req !== "None") {
-      var names = root.depNames(req)
-      out.push({ label: "Required by (" + names.length + ")",
-                 value: names.join(", ") + "\n\nRemoving this will break the packages above." })
+    // answered \u2014 this is the warning that removal would break another package.
+    var req = root.depNames(r.requiredBy)
+    if (req.length > 0) {
+      out.push({ label: "Required by (" + req.length + ")",
+                 value: req.join(", ")
+                       + "\n\nRemoving this will break the packages above." })
     }
     return out
   }
+
 
   property var detailRow: null
 
@@ -478,7 +499,93 @@ Panel {
     root.detailRow = row
     detailsSheet.open = true
     root.fetchDepGraph(row)
+    // Pacman rows are filled by the shared `pacman -Si` batch. AUR and Flathub
+    // rows get NOTHING from it -- that batch only collects rows carrying a
+    // pacmanPkg -- so their sheets were an almost-empty list of headings until
+    // these two were added. Both are on-demand, one request, for the single
+    // package the user opened.
+    if (row.pacmanPkg === "") {
+      if (row.aurPkg !== "") root.fetchAurInfo(row.aurPkg)
+      if (row.flatpakPkg !== "") root.fetchFlatpakInfo(row.flatpakPkg)
+    }
   }
+
+  // ---- AUR: the RPC's search interface does not return Depends/Conflicts/
+  // Provides/Groups/License at all (only NameSearch does), so the full record
+  // is fetched here, once, when the sheet opens.
+  function fetchAurInfo(pkg) {
+    if (pkg === "") return
+    root.aurInfoTarget = pkg
+    aurInfoProc.command = ["python3", root.aurSearchScript, "info", pkg]
+    aurInfoProc.running = false
+    aurInfoProc.running = true
+  }
+
+  Process {
+    id: aurInfoProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyAurInfo(text || "")
+    }
+  }
+
+  function applyAurInfo(text) {
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("I|") !== 0) continue
+      var parts = lines[i].split("|")
+      if (parts.length < 3) continue
+      var field = parts[1]
+      var value = parts.slice(2).join("|")
+      if (value === "") continue
+      var idx = root.rowIndexForPkg(root.aurInfoTarget)
+      if (idx < 0) continue
+      filteredModel.setProperty(idx, field, value)
+    }
+  }
+
+  property string aurInfoTarget: ""
+
+  // ---- Flathub: pacman knows nothing about a flatpak app id.
+  function fetchFlatpakInfo(id) {
+    if (id === "") return
+    root.flatpakInfoTarget = id
+    flatpakInfoProc.command = ["flatpak", "remote-info", "flathub", id]
+    flatpakInfoProc.running = false
+    flatpakInfoProc.running = true
+  }
+
+  Process {
+    id: flatpakInfoProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyFlatpakInfo(text || "")
+    }
+  }
+
+  function applyFlatpakInfo(text) {
+    var s = String(text || "")
+    var field = function(label) {
+      var m = s.match(new RegExp("^\\s*" + label + ":\\s*(.+)$", "mi"))
+      return m ? m[1].trim() : ""
+    }
+    var idx = root.rowIndexForFlatpak(root.flatpakInfoTarget)
+    if (idx < 0) return
+    var pairs = [
+      ["version", field("Version")],
+      ["arch", field("Arch")],
+      ["licenses", field("License")],
+      ["downloadSize", field("Download Size")],
+      ["installedSize", field("Installed Size")],
+      ["branch", field("Branch")],
+      ["collection", field("Collection")]
+    ]
+    for (var i = 0; i < pairs.length; i++) {
+      if (pairs[i][1] !== "") filteredModel.setProperty(idx, pairs[i][0], pairs[i][1])
+    }
+  }
+
+  property string flatpakInfoTarget: ""
 
   function closeDetails() {
     detailsSheet.open = false
@@ -511,7 +618,7 @@ Panel {
     var s = String(text || "")
     var name = (s.match(/^Name\s*:\s*(.+)$/m) || [])[1]
     if (!name) return
-    var idx = filteredModel.rowIndexForPkg(name.trim())
+    var idx = root.rowIndexForPkg(name.trim())
     if (idx < 0) return
     var field = function(label) {
       var m = s.match(new RegExp("^" + label + "\\s*:\\s*(.+)$", "mi"))
@@ -753,7 +860,8 @@ Panel {
       thumbnail: "", iconName: "", pacmanPkg: "", aurPkg: "", flatpakPkg: "", _pkg: "",
       aurVotes: "", aurMaintainer: "", aurOutdated: "", downloadSize: "",
       installedSize: "", dependsOn: "", optionalDeps: "", requiredBy: "",
-      conflictsWith: "", provides: "", groups: "", packager: ""
+      conflictsWith: "", provides: "", groups: "", packager: "",
+      branch: "", collection: ""
     }
     for (var key in strDefaults) {
       if (row[key] === undefined || row[key] === null) row[key] = strDefaults[key]
@@ -2431,6 +2539,8 @@ Panel {
               required property string provides
               required property string groups
               required property string packager
+              required property string branch
+              required property string collection
               // `rating`, `license`, `category` and `_pkg` stay in the model
               // (and the async writers resolve
               // rows by _pkg through filteredModel.get(), not through a
@@ -2902,22 +3012,39 @@ Panel {
   // panel or force the layout to be recomputed mid-interaction. A popup keeps
   // the grid exactly where it is and gives the dependency text room to be
   // readable.
+  // ------------------------------------------------------- details sheet
+  // A separate PopupCard rather than an inline expansion: the results list has
+  // a fixed three-row viewport, so growing a card would either overflow the
+  // panel or force the whole layout to be recomputed mid-interaction.
   PopupCard {
     id: detailsSheet
     anchorItem: panel.anchorItem
     bar: root.bar
     owner: root.barIdentity
     triggerMode: "click"
-    contentWidth: detailsSheet.fittedContentWidth(Style.space(460), Style.space(460))
-    contentHeight: detailsSheet.cappedContentHeight(detailsCol.implicitHeight)
+    contentWidth: detailsSheet.fittedContentWidth(Style.space(440), Style.space(440))
+    // Sized to its content, then capped: the card should not carry a large
+    // empty area under a short fact list, and must still scroll rather than
+    // clip when the list is long. detailsCol.implicitHeight is independent of
+    // the Flickable's own height, so this does not feed back on itself.
+    contentHeight: detailsSheet.cappedContentHeight(
+      detailsCol.implicitHeight
+      + detailsHeader.implicitHeight
+      + detailsReason.implicitHeight
+      + Style.spacing.sm * 2 + Style.spacing.lg)
 
     Column {
-      id: detailsCol
-      width: parent.width
+      id: detailsOuter
+      anchors.fill: parent
       spacing: Style.spacing.sm
 
+      // Pinned header: the package name and the close button stay readable
+      // however far the fact list below is scrolled.
       RowLayout {
+        id: detailsHeader
         width: parent.width
+        Layout.fillWidth: true
+
         Text {
           text: root.detailRow ? root.detailRow.name : ""
           color: Color.popups.text
@@ -2931,7 +3058,7 @@ Panel {
         }
         Button {
           focusable: false
-          text: "✕"
+          text: "\u2715"
           foreground: Color.popups.text
           fontFamily: Style.font.family
           fontSize: Style.font.caption
@@ -2940,6 +3067,7 @@ Panel {
       }
 
       Text {
+        id: detailsReason
         width: parent.width
         text: root.detailRow ? root.matchReason(root.detailRow.name) : ""
         color: Util.alpha(Color.popups.text, 0.6)
@@ -2949,33 +3077,60 @@ Panel {
         textFormat: Text.PlainText
       }
 
-      Repeater {
-        model: root.detailRow
-          ? root.sheetFacts(root.detailRow)
-          : []
-        delegate: Column {
-          required property var modelData
-          width: detailsCol.width
-          spacing: 0
-          visible: String(modelData.value) !== "" && String(modelData.value) !== "None"
+      Flickable {
+        id: detailsFlick
+        width: parent.width
+        Layout.fillWidth: true
+        // Takes whatever is left under the pinned header.
+        height: Math.max(0, parent.height - y)
+        contentWidth: width
+        contentHeight: detailsCol.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
 
-          Text {
-            width: parent.width
-            text: modelData.label
-            color: Util.alpha(Color.popups.text, 0.5)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            textFormat: Text.PlainText
-          }
-          Text {
-            width: parent.width
-            text: modelData.value
-            color: Color.popups.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
+        QC.ScrollBar.vertical: QC.ScrollBar {
+          policy: QC.ScrollBar.AsNeeded
+          width: Style.spacing.sm
+        }
+
+        Column {
+          id: detailsCol
+          width: detailsFlick.width
+          spacing: Style.spacing.md
+
+          Repeater {
+            model: root.detailRow ? root.sheetFacts(root.detailRow) : []
+            delegate: Column {
+              required property var modelData
+              width: detailsCol.width
+              spacing: Style.spacing.xxs
+              // A label with no value carries no information - hide the pair
+              // rather than leaving a dangling heading.
+              visible: String(modelData.value) !== ""
+                    && String(modelData.value) !== "None"
+
+              Text {
+                width: parent.width
+                text: modelData.label
+                color: Util.alpha(Color.popups.text, 0.45)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption - 1
+                font.bold: true
+                font.letterSpacing: 0.6
+                textFormat: Text.PlainText
+              }
+              Text {
+                width: parent.width
+                text: modelData.value
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+            }
           }
         }
       }

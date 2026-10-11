@@ -191,7 +191,12 @@ function isAurRow(e) {
 function depNames(field) {
     var raw = String(field === undefined || field === null ? "" : field).trim();
     if (raw === "") return [];
-    var parts = raw.split(/\s{2,}/);
+    // Two formats reach here: pacman separates entries with TWO spaces, while
+    // the AUR info path delivers a comma-joined list. Splitting on only the
+    // former silently collapsed every AUR dependency list into one entry
+    // ("pacman>6.1, git" read as a single dependency). Package names never
+    // contain a comma, so treating one as a separator is safe.
+    var parts = raw.split(/(?:\s{2,}|,)/);
     var out = [];
     for (var i = 0; i < parts.length; i++) {
         var part = parts[i].trim();
