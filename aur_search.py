@@ -4,7 +4,8 @@
 # Queries the Arch User Repository RPC v5 `search` endpoint and emits one
 # tab-separated row per match:
 #
-#   name \t description \t version \t website \t license \t packagebase \t votes \t lastmodified
+#   name \t description \t version \t website \t license \t packagebase \t votes
+#   \t lastmodified \t maintainer \t outofdate
 #
 # The default `by=name-desc` search matches both package names and
 # descriptions, so natural phrases like "video editing" surface relevant
@@ -29,7 +30,9 @@ import sys
 import urllib.parse
 import urllib.request
 
-QUERY_COLUMNS = 8
+# name, description, version, website, license, packagebase, votes,
+# lastmodified, maintainer, outofdate (a unix timestamp, "" when current).
+QUERY_COLUMNS = 10
 MAX_BYTES = int(os.environ.get("FOSSFETCH_MAX_AUR", "8388608"))  # 8 MiB cap
 
 
@@ -126,7 +129,17 @@ def main():
         pkgbase = cleanup(p.get("PackageBase")) or name
         votes = str(p.get("NumVotes") or "")
         lastmod = str(p.get("LastModified") or "")
-        print("\t".join([name, desc, version, website, license_, pkgbase, votes, lastmod]))
+        # Trust signals. The RPC returns null/0 for packages that are current;
+        # anything non-zero in OutOfDate means the maintainer has flagged it as
+        # out of date, which is the single most useful warning on an AUR card.
+        maintainer = cleanup(p.get("Maintainer"))
+        outofdate = p.get("OutOfDate")
+        try:
+            outofdate = str(int(outofdate)) if outofdate else ""
+        except (TypeError, ValueError):
+            outofdate = ""
+        print("\t".join([name, desc, version, website, license_, pkgbase, votes,
+                         lastmod, maintainer, outofdate]))
         count += 1
     print("STATUS|ok|%d" % count)
 

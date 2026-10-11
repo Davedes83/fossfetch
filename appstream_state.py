@@ -120,13 +120,35 @@ def open_catalog(cache_root, create=False):
 
 
 def open_sub(fd, rel):
-    """Open a pre-existing subdirectory path relative to catalog using fds."""
-    for part in rel.split("/"):
-        if not part or part in (".", ".."):
-            raise OSError(errno.EINVAL, "bad relative component: %r" % part)
-        fd = _open_at(fd, part)
-        _check_owned(os.fstat(fd), ".../" + part)
-    return fd
+    """Open a pre-existing subdirectory path relative to catalog using fds.
+
+    Each component is opened from the descriptor of the previous one, and every
+    intermediate descriptor is released as soon as its child is in hand — the
+    previous version reassigned the loop variable without closing it, leaking one
+    fd per path component. The descriptor the caller passes in is left open:
+    callers still own it and close it themselves.
+    """
+    current = fd
+    opened = []
+    try:
+        for part in rel.split("/"):
+            if not part or part in (".", ".."):
+                raise OSError(errno.EINVAL, "bad relative component: %r" % part)
+            nfd = _open_at(current, part)
+            _check_owned(os.fstat(nfd), ".../" + part)
+            if current is not fd:
+                os.close(current)
+            current = nfd
+            opened.append(nfd)
+    except Exception:
+        # Close only what this call opened — never the caller's descriptor.
+        for nfd in opened:
+            try:
+                os.close(nfd)
+            except OSError:
+                pass
+        raise
+    return current
 
 
 def exists(fd, name):

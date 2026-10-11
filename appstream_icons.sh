@@ -65,6 +65,13 @@ cache="${2:-$HOME/.cache/fossfetch}"
 STORE="$cache/catalog"
 python3 "$STATE_PY" ensure "$cache" || { echo "unsafe or unusable appstream cache path: $cache" >&2; exit 1; }
 
+# Build-state markers + growing retry backoff. See catalog_markers.sh for why
+# these exist and how the window is computed.
+# shellcheck source=catalog_markers.sh
+. "$SCRIPT_DIR/catalog_markers.sh"
+BUILD_MARKER="$STORE/.building"
+FAILED_MARKER="$STORE/.failed"
+
 # The tied (config, pacman-installed) local source of truth, used when the
 # archlinux-appstream-data package is present.
 #
@@ -117,9 +124,46 @@ valid_version() {
   esac
 }
 
+# Wrapper around the real build: gates it on the build-state markers so a
+# search never waits behind another build, and an offline machine does not retry
+# the download on every keystroke. The body (build_catalog) keeps the original
+# freshness short-circuit, so a warm catalog still costs a couple of stats.
 ensure_catalog() {
-  marker="$STORE/current"
+  local want
   want=$(expected_version)
+  if valid_version "$want" && [ -f "$STORE/current" ] && [ "$(cat "$STORE/current" 2>/dev/null)" = "$want" ] && [ -d "$STORE/$want" ]; then
+    local mtime now age
+    mtime=$(stat -c %Y "$STORE/current" 2>/dev/null || echo 0)
+    if [ -n "$mtime" ] && [ "$mtime" -gt 0 ]; then
+      now=$(date +%s)
+      age=$(( (now - mtime) / 86400 ))
+      [ "$age" -lt "$STALE_DAYS" ] && return 0
+    fi
+  fi
+
+  if catalog_marker_fresh "$BUILD_MARKER" "$CATALOG_BUILD_STALE_SECONDS"; then
+    echo "appstream catalog: a build is already running" >&2
+    return 1
+  fi
+  if catalog_backoff_active "$FAILED_MARKER"; then
+    echo "appstream catalog: backing off after a recent failed build" >&2
+    return 1
+  fi
+  catalog_mark_building "$BUILD_MARKER"
+
+  if build_catalog "$want"; then
+    catalog_clear_building "$BUILD_MARKER"
+    catalog_clear_failed "$FAILED_MARKER"
+    return 0
+  fi
+  catalog_clear_building "$BUILD_MARKER"
+  catalog_mark_failed "$FAILED_MARKER"
+  return 1
+}
+
+build_catalog() {
+  local want="$1"
+  marker="$STORE/current"
 
   # An empty or otherwise unusable version must never reach the state helper.
   # `prune "$cache" ""` in particular would match no entry to keep and delete
@@ -140,7 +184,6 @@ ensure_catalog() {
     fi
   fi
 
-  target="$STORE/$want"
   tmpname=$(python3 "$STATE_PY" tmpdir "$cache") || { echo "mktemp failed" >&2; return 1; }
   tmpdir="$STORE/$tmpname"
 

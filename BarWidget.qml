@@ -204,12 +204,13 @@ BarWidget {
   }
 
   // Optional native Hyprland global-shortcut alternative to the IPC hotkey.
-  // Enabled by binding in Hyprland: bind = SUPER ALT, A, global, quickshell:toggle_alt_finder
+  // Enabled by binding in Hyprland, e.g.:
+  //   bind = SUPER ALT, F, global, quickshell:toggle_alt_finder
   GlobalShortcut {
     id: globalShortcut
     appid: "quickshell"
     name: "toggle_alt_finder"
-    description: "Toggle Open Source Alternative Finder"
+    description: "Toggle FossFetch package search"
     onPressed: root.togglePanel()
   }
 

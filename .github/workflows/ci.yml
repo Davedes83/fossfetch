@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The suite stubs pacman / flatpak and serves every download from an
+      # in-process fixture server, so it needs neither Arch nor a network.
+      - name: Run tests
+        run: python tests/security_test.py
+
+      - name: QML structural check
+        run: python tools/qml_lint.py
+
+      - name: Validate manifest.json
+        run: |
+          python - <<'PY'
+          import json
+          m = json.load(open("manifest.json"))
+          for key in ("schemaVersion", "id", "name", "version", "author", "description", "kinds", "entryPoints"):
+              assert key in m, "manifest.json missing %r" % key
+          for kind, path in m["entryPoints"].items():
+              import os
+              assert os.path.exists(path), "entry point %r -> %s does not exist" % (kind, path)
+          print("manifest.json OK")
+          PY
+
+  lint:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      # SC2034: appstream_pins.sh and catalog_markers.sh are sourced files —
+      # every value in them is read by the scripts that dot-source it.
+      # SC1091: shellcheck cannot follow the . at the top of a file it was not
+      # given; the sourced files are passed explicitly, so only the "not
+      # following" info remains.
+      - name: shellcheck
+        run: |
+          shellcheck -e SC2034,SC1091 \
+            appstream_icons.sh \
+            appstream_groups.sh \
+            appstream_pins.sh \
+            catalog_markers.sh \
+            backend_pacman.sh \
+            backend_flatpak.sh \
+            tools/update_pins.sh
+
+      - name: bash -n syntax check
+        run: |
+          for f in appstream_icons.sh appstream_groups.sh appstream_pins.sh \
+                   backend_pacman.sh backend_flatpak.sh tools/update_pins.sh; do
+            bash -n "$f"
+          done
+
+      - name: python syntax check
+        run: |
+          python -m compileall -q \
+            appstream_state.py aur_search.py flatpak_icon.py flathub_groups.py \
+            tools/qml_lint.py tests/security_test.py

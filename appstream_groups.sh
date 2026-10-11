@@ -46,12 +46,17 @@ export FOSSFETCH_PINNED_SUMS="${SRC_PINS[*]}"
 BASE="${ARCH_BASE:-https://sources.archlinux.org/other/packages/archlinux-appstream-data}"
 SWCATALOG="${FOSSFETCH_SWCATALOG:-/usr/share/swcatalog}"
 REPOS="core extra multilib"
-ARCH="x86_64"
 
 mode="${1:-}"
 cache="${2:-$HOME/.cache/fossfetch}"
 STORE="$cache/catalog"
 KEYWORDS="$SCRIPT_DIR/groups.keywords"
+
+# Build-state markers + growing retry backoff (see catalog_markers.sh).
+# shellcheck source=catalog_markers.sh
+. "$SCRIPT_DIR/catalog_markers.sh"
+GROUPS_BUILD_MARKER="$STORE/.groups-building"
+GROUPS_FAILED_MARKER="$STORE/.groups-failed"
 
 local_available() {
   [ -d "$SWCATALOG/icons" ] && [ -d "$SWCATALOG/xml" ] || return 1
@@ -101,7 +106,31 @@ keyword_categories() {
   return 1
 }
 
+# Wrapper: gates the group build on its own build/failure markers, mirroring
+# appstream_icons.sh. `ensure` is reachable from the search path (and from the
+# detached background spawn), so without these a failing build would be retried
+# on every search and a slow one would pile up behind itself.
 ensure_groups() {
+  if catalog_marker_fresh "$GROUPS_BUILD_MARKER" "$CATALOG_BUILD_STALE_SECONDS"; then
+    echo "group index: a build is already running" >&2
+    return 1
+  fi
+  if catalog_backoff_active "$GROUPS_FAILED_MARKER"; then
+    echo "group index: backing off after a recent failed build" >&2
+    return 1
+  fi
+  catalog_mark_building "$GROUPS_BUILD_MARKER"
+  if build_groups; then
+    catalog_clear_building "$GROUPS_BUILD_MARKER"
+    catalog_clear_failed "$GROUPS_FAILED_MARKER"
+    return 0
+  fi
+  catalog_clear_building "$GROUPS_BUILD_MARKER"
+  catalog_mark_failed "$GROUPS_FAILED_MARKER"
+  return 1
+}
+
+build_groups() {
   # The verified catalog version marker is produced by the icon catalog ensure
   # (local-pacman or pinned-network) — single source of truth for the release.
   "$SCRIPT_DIR/appstream_icons.sh" ensure "$cache" || return 1
@@ -138,11 +167,12 @@ ensure_groups() {
     fi
     if ! python3 - "$src_mode" "$BASE" "$date_dir" "$repo" "$SWCATALOG" >> "$tmp" <<'PY'
 import hashlib
+import gzip
+import io
 import os
-import re
 import sys
 import urllib.request
-import zlib
+import xml.etree.ElementTree as ET
 
 src_mode, BASE, ver, repo, swcatalog = sys.argv[1:6]
 
@@ -173,31 +203,80 @@ def fetch(url, cap):
     return bytes(data)
 
 
-def gunzip_bounded(raw, cap):
-    # Streaming decompression: a gzip bomb aborts once the decompressed quota
-    # is exceeded instead of being buffered in full.
-    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    out = bytearray()
-    i = 0
-    while i < len(raw):
-        out += d.decompress(raw[i:i + 65536])
-        i += 65536
-        if len(out) > cap:
-            return None
-    if not d.eof or d.unused_data:
-        return None
-    return bytes(out)
+class _QuotaExceeded(Exception):
+    pass
 
 
-def parse(xml):
-    for m in re.finditer(rb"<component type=\"desktop-application\".*?</component>", xml, re.S):
-        blk = m.group(0)
-        pkg = re.search(rb"<pkgname>(.*?)</pkgname>", blk)
-        if not pkg:
-            continue
-        p = pkg.group(1).decode()
-        for c in re.findall(rb"<category>(.*?)</category>", blk):
-            sys.stdout.write(c.decode() + "\t" + p + "\n")
+class _BoundedReader:
+    """Read wrapper that refuses to hand out more than `cap` decompressed bytes.
+
+    The request is clamped as well as checked: a caller asking for -1 would
+    otherwise pull an entire decompression bomb into one buffer before the quota
+    could be applied.
+    """
+
+    def __init__(self, stream, cap):
+        self._stream = stream
+        self._cap = cap
+        self._seen = 0
+
+    def read(self, size=-1):
+        if size is None or size < 0 or size > 65536:
+            size = 65536
+        chunk = self._stream.read(size)
+        self._seen += len(chunk)
+        if self._seen > self._cap:
+            raise _QuotaExceeded()
+        return chunk
+
+    def readable(self):
+        return True
+
+
+def parse(raw):
+    """Emit "<category>\\t<pkgname>" for every desktop component, streaming.
+
+    The Arch Components XML is ~27 MiB per repo decompressed. This used to
+    buffer the whole thing and regex it; a pull parser plus a bounded reader
+    keeps peak memory at one chunk plus one component while still aborting a
+    gzip bomb at the quota.
+    """
+    stream = gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb")
+    reader = _BoundedReader(stream, MAX_XML)
+    parser = ET.XMLPullParser(events=("start", "end"))
+    tree_root = None
+    out = sys.stdout
+    try:
+        while True:
+            chunk = reader.read(65536)
+            if not chunk:
+                break
+            parser.feed(chunk)
+            for event, elem in parser.read_events():
+                if event == "start":
+                    if tree_root is None:
+                        tree_root = elem
+                    continue
+                if elem.tag != "component":
+                    continue
+                if elem.get("type") == "desktop-application":
+                    pkg_el = elem.find("pkgname")
+                    pkg = "".join(pkg_el.itertext()).strip() if pkg_el is not None else ""
+                    if pkg:
+                        for cat_el in elem.iter("category"):
+                            cat = "".join(cat_el.itertext()).strip()
+                            if cat:
+                                out.write(cat + "\t" + pkg + "\n")
+                elem.clear()
+                children = list(tree_root) if tree_root is not None else []
+                if children and children[0] is elem:
+                    del tree_root[0]
+        parser.close()
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 REPO_ORDER = ["core", "extra", "multilib"]
@@ -211,10 +290,10 @@ if src_mode == "local":
         raw = fh.read()
     if len(raw) > MAX_RAW:
         sys.exit(2)
-    xml = gunzip_bounded(raw, MAX_XML)
-    if xml is None:
+    try:
+        parse(raw)
+    except (_QuotaExceeded, ET.ParseError, OSError):
         sys.exit(3)
-    parse(xml)
     sys.exit(0)
 
 sums = os.environ.get("FOSSFETCH_PINNED_SUMS", "").split()
@@ -230,10 +309,10 @@ slot = REPO_ORDER.index(repo) * 4 + SLOT_XML
 if hashlib.sha256(raw).hexdigest() != sums[slot]:
     sys.exit(5)  # unauthorized/checksum-mismatched file -> refused
 
-xml = gunzip_bounded(raw, MAX_XML)
-if xml is None:
+try:
+    parse(raw)
+except (_QuotaExceeded, ET.ParseError, OSError):
     sys.exit(6)
-parse(xml)
 sys.exit(0)
 PY
     then
@@ -261,8 +340,19 @@ resolve_groups() {
   cats=$(keyword_categories "$kw")
   [ -n "$cats" ] || return 0
 
-  # Fresh catalog check is a single stat; only downloads/rebuilds when stale.
-  ensure_groups
+  # Never let a catalog rebuild stand between the user and their results.
+  # `resolve` runs on the search path, so:
+  #   * no index yet  -> build once here (still bounded by the failure backoff,
+  #                      so an offline machine fails fast instead of retrying on
+  #                      every keystroke);
+  #   * index present -> serve it immediately. If it is stale, kick off a
+  #                      detached rebuild whose output lands for the NEXT
+  #                      search rather than stalling this one.
+  if [ -f "$STORE/current" ]; then
+    groups_stale && ensure_groups_background
+  else
+    ensure_groups >/dev/null 2>&1
+  fi
 
   [ -f "$STORE/current" ] || return 0
   date_dir=$(cat "$STORE/current" 2>/dev/null)
@@ -273,6 +363,30 @@ resolve_groups() {
   for cat in $(echo "$cats" | tr ',' ' '); do
     awk -F'\t' -v c="$cat" '$1 == c { print $2 }' "$index"
   done | sort -u
+}
+
+# The group index is older than the catalog marker -> worth rebuilding, but only
+# in the background.
+groups_stale() {
+  [ -f "$STORE/current" ] || return 0
+  local g m
+  g=$(stat -c %Y "$STORE/current/groups.tsv" 2>/dev/null || echo 0)
+  m=$(stat -c %Y "$STORE/current" 2>/dev/null || echo 0)
+  [ -s "$STORE/current/groups.tsv" ] || return 0
+  [ "$g" -lt "$m" ]
+}
+
+# Detached rebuild. setsid (util-linux) puts the child in its own session so it
+# survives the panel's search process being killed between keystrokes; the
+# stdio redirects keep it from holding the caller's pipe open.
+ensure_groups_background() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$SCRIPT_DIR/appstream_groups.sh" ensure "$cache" </dev/null >/dev/null 2>&1 &
+  else
+    "$SCRIPT_DIR/appstream_groups.sh" ensure "$cache" </dev/null >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null || true
+  return 0
 }
 
 case "$mode" in

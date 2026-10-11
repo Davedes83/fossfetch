@@ -13,12 +13,15 @@
 # table) to AppStream categories and prints "appid<TAB>name<TAB>summary" per
 # matching app, deduplicated. Prints nothing when the keyword matches no group.
 
+import gzip
+import io
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
-import zlib
+import xml.etree.ElementTree as ET
 
 BASE = os.environ.get(
     "FLATHUB_APPSTREAM_URL",
@@ -51,20 +54,96 @@ def fetch_bytes(url, cap, timeout=90):
     return bytes(data)
 
 
-def gunzip_bounded(raw, cap):
-    """Streaming gzip decompression that aborts once `cap` decompressed bytes
-    are produced, so a gzip bomb cannot exhaust memory."""
-    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    out = bytearray()
-    i = 0
-    while i < len(raw):
-        out += d.decompress(raw[i:i + 65536])
-        i += 65536
-        if len(out) > cap:
-            return None
-    if not d.eof or d.unused_data:
-        return None
-    return bytes(out)
+class _QuotaExceeded(Exception):
+    pass
+
+
+class _BoundedReader:
+    """Read wrapper that refuses to hand out more than `cap` decompressed bytes.
+
+    This is what replaces the old "decompress the whole thing into a bytearray"
+    step: the parser pulls chunks on demand, so peak memory is the chunk size
+    plus whatever the parser retains (a single <component>), not the whole
+    ~48 MiB catalogue. The quota is still enforced, so a gzip bomb aborts
+    instead of filling RAM.
+    """
+
+    def __init__(self, stream, cap):
+        self._stream = stream
+        self._cap = cap
+        self._seen = 0
+
+    def read(self, size=-1):
+        # Clamp the request: iterparse normally asks for 16 KiB, but a caller
+        # asking for -1 would otherwise pull the entire decompression bomb into
+        # one buffer before the quota could be checked.
+        if size is None or size < 0 or size > 65536:
+            size = 65536
+        chunk = self._stream.read(size)
+        self._seen += len(chunk)
+        if self._seen > self._cap:
+            raise _QuotaExceeded()
+        return chunk
+
+    # iterparse only needs read(), but be explicit for anything else.
+    def readable(self):
+        return True
+
+    def close(self):
+        self._stream.close()
+
+
+def _drop_component(tree_root, elem):
+    """Release a finished <component> so the parser does not retain the document.
+
+    stdlib ElementTree keeps every element attached to its parent, so clear()
+    alone still grows the tree to the full catalogue size. The finished element
+    is always the first child of the root (we visit in document order), so
+    dropping index 0 keeps the remaining list short.
+    """
+    elem.clear()
+    if tree_root is None:
+        return
+    children = list(tree_root)
+    if children and children[0] is elem:
+        del tree_root[0]
+
+
+def iter_components(raw, cap):
+    """Yield every desktop <component> element from a gzipped AppStream catalogue.
+
+    Streams the archive through a bounded reader and an XMLPullParser, so peak
+    memory is one chunk plus one component instead of the whole ~48 MiB
+    document. Raises _QuotaExceeded if the stream passes `cap` decompressed
+    bytes, so a gzip bomb aborts rather than filling RAM.
+    """
+    stream = gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb")
+    reader = _BoundedReader(stream, cap)
+    parser = ET.XMLPullParser(events=("start", "end"))
+    tree_root = None
+    try:
+        while True:
+            chunk = reader.read(65536)
+            if not chunk:
+                break
+            parser.feed(chunk)
+            for event, elem in parser.read_events():
+                if event == "start":
+                    if tree_root is None:
+                        tree_root = elem
+                    continue
+                if elem.tag != "component":
+                    continue
+                wanted = elem.get("type") in ("desktop-application", "desktop")
+                if wanted:
+                    yield elem
+                _drop_component(tree_root, elem)
+        parser.close()
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def script_dir():
@@ -117,52 +196,210 @@ def stale(root):
         return True
 
 
+def _flathub_dir(root):
+    return os.path.join(root, "flathub")
+
+
+def _touch(root, name):
+    try:
+        os.makedirs(_flathub_dir(root), exist_ok=True)
+        with open(os.path.join(_flathub_dir(root), name), "a"):
+            pass
+    except OSError:
+        pass
+
+
+def _drop(root, name):
+    try:
+        os.unlink(os.path.join(_flathub_dir(root), name))
+    except OSError:
+        pass
+
+
+def build_running(root):
+    return os.path.exists(os.path.join(_flathub_dir(root), ".building"))
+
+
+def failure_count(root):
+    try:
+        with open(os.path.join(_flathub_dir(root), ".failed")) as fh:
+            n = int(fh.read().strip() or "0")
+        return max(0, n)
+    except (OSError, ValueError):
+        return 0
+
+
+def mark_failed(root):
+    # Read the count BEFORE opening for write: open(..., "w") truncates, so
+    # counting first would pin the marker at 1 and freeze the backoff at base.
+    n = failure_count(root) + 1
+    try:
+        os.makedirs(_flathub_dir(root), exist_ok=True)
+        with open(os.path.join(_flathub_dir(root), ".failed"), "w") as fh:
+            fh.write(str(n))
+    except OSError:
+        pass
+
+
+def backoff_window(root):
+    """Retry window for the current failure count: base * 2^(n-1), clamped.
+
+    Grows rather than sitting at a fixed maximum so a brief outage costs a
+    minute of staleness instead of locking the index out for hours, while a
+    sustained outage is not retried on every single search.
+    """
+    n = failure_count(root)
+    if n <= 0:
+        return 0.0
+    base = float(os.environ.get("FOSSFETCH_CATALOG_BACKOFF_SECONDS", "60"))
+    cap = float(os.environ.get("FOSSFETCH_CATALOG_BACKOFF_MAX_SECONDS", "21600"))
+    return min(base * (2 ** (n - 1)), cap)
+
+
+def backoff_active(root):
+    """True when a recent build attempt failed inside the retry window.
+
+    Without this an offline machine re-attempts a ~10 MB download on EVERY
+    search — resolve() runs on the search path — so a missing network turns
+    every keystroke into a stalled panel instead of a served local index.
+    """
+    marker = os.path.join(_flathub_dir(root), ".failed")
+    window = backoff_window(root)
+    if window <= 0:
+        return False
+    try:
+        return (time.time() - os.path.getmtime(marker)) < window
+    except OSError:
+        return False
+
+
+def refresh_in_background(root):
+    """Kick off a detached rebuild so the NEXT search sees fresh data.
+
+    Never blocks the caller: the current (stale) index is served immediately
+    and this picks up the result later.
+    """
+    if build_running(root) or backoff_active(root):
+        return
+    _touch(root, ".building")
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "ensure", root],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        _drop(root, ".building")
+
+
 def ensure(root):
-    groups_dir = os.path.join(root, "flathub")
+    groups_dir = _flathub_dir(root)
     os.makedirs(groups_dir, exist_ok=True)
     target = os.path.join(groups_dir, "groups.tsv")
-    if os.path.exists(target) and not stale(root):
+    # names.tsv is part of the build output now, so its absence (a cache made
+    # by an older version) must force one rebuild.
+    if os.path.exists(target) and os.path.exists(os.path.join(groups_dir, "names.tsv")) \
+            and not stale(root):
         print("flathub groups fresh", file=sys.stderr)
         return True
+    if build_running(root):
+        return False
+    if backoff_active(root):
+        print("flathub groups: backing off after a recent failed build", file=sys.stderr)
+        return False
+    _touch(root, ".building")
+    ok = _build(root)
+    _drop(root, ".building")
+    if ok:
+        _drop(root, ".failed")
+    else:
+        mark_failed(root)
+    return ok
 
+
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
+
+def _child_text(elem, tag):
+    """Flattened text of a direct child element, or "" when absent.
+
+    Two catalogue details this has to get right:
+
+    * <name>/<summary> are repeated per language as <name xml:lang="pl">. The
+      untranslated one is the one the index wants — picking the first child
+      returned e.g. the Arabic display name for an app named "Dialect".
+    * The old regex pass matched only bare `<name>` tags, so it naturally
+      skipped the translated ones; this reproduces that explicitly.
+    """
+    child = elem.find(tag)
+    if child is None:
+        return ""
+    for candidate in elem.findall(tag):
+        if candidate.get(XML_LANG) is None:
+            child = candidate
+            break
+    return "".join(child.itertext()).strip()
+
+
+def _first_release(elem):
+    """First <release> anywhere in the subtree, or None.
+
+    Flathub wraps releases in <releases>, so a direct-child lookup finds
+    nothing and every app would lose its version and release date. Releases are
+    listed newest-first, matching the old first-match regex behaviour.
+    """
+    return next(elem.iter("release"), None)
+
+
+def _build(root):
+    groups_dir = _flathub_dir(root)
+    target = os.path.join(groups_dir, "groups.tsv")
     try:
         raw = fetch_bytes(BASE, MAX_RAW)
-        if raw is None:
-            print("download exceeded size limits", file=sys.stderr)
-            return False
-        data = gunzip_bounded(raw, MAX_OUT)
-        if data is None:
-            print("decompressed data exceeded size limits", file=sys.stderr)
-            return False
     except Exception as e:
         print("download failed: %s" % e, file=sys.stderr)
         return False
+    if raw is None:
+        print("download exceeded size limits", file=sys.stderr)
+        return False
 
     index = {}
-    for typ in (b"desktop-application", b"desktop"):
-        for m in re.finditer(rb"<component type=\"" + typ + rb"\".*?</component>", data, re.S):
-            blk = m.group(0)
-            appid = re.search(rb"<id>(.*?)</id>", blk)
-            if not appid:
+    # Every component's display name, whether or not it declares a <category>.
+    # groups.tsv only carries categorised apps, so it is not a complete name ->
+    # appid map; flatpak_icon.py needs one to resolve package names to Flathub
+    # app ids without shelling out to `flatpak search` once per name.
+    names = {}
+    try:
+        for comp in iter_components(raw, MAX_OUT):
+            aid = _child_text(comp, "id")
+            if not aid:
                 continue
-            aid = appid.group(1).decode()
-            name_m = re.search(rb"<name>(.*?)</name>", blk, re.S)
-            sum_m = re.search(rb"<summary>(.*?)</summary>", blk, re.S)
-            ver_m = re.search(rb"<release[^>]*version=\"([^\"]+)\"", blk)
-            date_m = re.search(rb"<release[^>]*timestamp=\"([^\"]+)\"", blk)
-            if name_m:
-                name = re.sub(rb"<.*?>", b"", name_m.group(1)).decode().strip()
-            else:
-                name = aid
-            if sum_m:
-                summary = re.sub(rb"<.*?>", b"", sum_m.group(1)).decode().strip()
-            else:
-                summary = ""
-            version = ver_m.group(1).decode() if ver_m else ""
-            released = date_m.group(1).decode() if date_m else ""
-            for c in re.findall(rb"<category>(.*?)</category>", blk):
-                cat = c.decode()
+            name = _child_text(comp, "name") or aid
+            summary = _child_text(comp, "summary")
+            release = _first_release(comp)
+            version = release.get("version", "") if release is not None else ""
+            released = release.get("timestamp", "") if release is not None else ""
+            if aid not in names:
+                names[aid] = (name, released)
+            for cat_el in comp.iter("category"):
+                # Flathub nests these under a <categories> wrapper while the
+                # Arch catalogue emits them as direct children, so search the
+                # whole subtree rather than only direct children.
+                cat = "".join(cat_el.itertext()).strip()
+                if not cat:
+                    continue
                 index.setdefault(cat, {})[aid] = (name, summary, version, released)
+    except _QuotaExceeded:
+        print("decompressed data exceeded size limits", file=sys.stderr)
+        return False
+    except ET.ParseError as e:
+        # A truncated or malformed catalogue must fail the build cleanly rather
+        # than half-writing an index that later searches would treat as complete.
+        print("appstream parse failed: %s" % e, file=sys.stderr)
+        return False
+    except OSError as e:
+        print("appstream read failed: %s" % e, file=sys.stderr)
+        return False
 
     groups_dir = os.path.join(root, "flathub")
     target = os.path.join(groups_dir, "groups.tsv")
@@ -198,15 +435,35 @@ def ensure(root):
         for aid, released in sorted(appids.items()):
             fh.write("%s\t%s\n" % (clean(aid), clean(released)))
     os.replace(appid_target + ".tmp", appid_target)
+
+    # Complete display-name -> app-id index for every component (not just the
+    # categorised ones). flatpak_icon.py reads this instead of running
+    # `flatpak search` up to three times per package name, which was the single
+    # slowest thing the panel did on the search path.
+    name_target = os.path.join(groups_dir, "names.tsv")
+    with open(name_target + ".tmp", "w") as fh:
+        for aid, (name, _released) in sorted(names.items()):
+            fh.write("%s\t%s\n" % (clean(aid), clean(name)))
+    os.replace(name_target + ".tmp", name_target)
+
     print("built flathub groups: %d categories, %d apps" % (len(index), sum(len(v) for v in index.values())), file=sys.stderr)
     return True
 
 
 def resolve(root, keyword):
-    ensure(root)
     target = os.path.join(root, "flathub", "groups.tsv")
     if not os.path.exists(target):
-        return
+        # First run: there is nothing to serve yet, so build once here (still
+        # bounded by the failure backoff so an offline machine fails fast
+        # instead of retrying on every keystroke).
+        ensure(root)
+        if not os.path.exists(target):
+            return
+    elif stale(root):
+        # A stale index is still a usable index. Serve it immediately and let a
+        # detached rebuild refresh it for the next search — previously the
+        # ~10 MB download ran inline, stalling every result list behind it.
+        refresh_in_background(root)
     kw = keyword.strip().lower().replace("_", " ").replace("-", " ")
     kw = re.sub(r"\s+", " ", kw)
     if not kw:

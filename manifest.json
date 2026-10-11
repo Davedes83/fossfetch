@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "davedes.fossfetch",
   "name": "FossFetch",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "davedes",
   "license": "MIT",
-  "description": "Search for open-source alternatives to proprietary apps and install them with one click (pacman / AUR / Flatpak).",
+  "description": "Search Arch, AUR and Flathub, and find a FOSS replacement for the app you use — with one-click install and live package metadata.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,13 +14,14 @@
   },
   "barWidget": {
     "displayName": "FossFetch",
-    "description": "Search for open-source alternatives to proprietary apps",
+    "description": "Search pacman, AUR and Flathub, and find FOSS replacements for proprietary apps",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "panelWidth": 560,
-      "debounceMs": 150
+      "debounceMs": 150,
+      "buttonLabel": "Find App"
     },
     "schema": [
       {
@@ -42,7 +43,35 @@
         "step": 25,
         "defaultValue": 150,
         "description": "Milliseconds to wait after typing before filtering results. Smoother on large lists."
+      },
+      {
+        "key": "buttonLabel",
+        "type": "string",
+        "label": "Bar button label",
+        "defaultValue": "Find App",
+        "description": "Text on the bar pill. Hidden when the toolbar design is 'icon'."
       }
+    ],
+    "aliases": [
+      "foss",
+      "finder",
+      "alternatives",
+      "package search",
+      "app store",
+      "install apps"
     ]
-  }
+  },
+  "homepage": "https://github.com/Davedes83/fossfetch",
+  "repository": "https://github.com/Davedes83/fossfetch",
+  "keywords": [
+    "foss",
+    "alternatives",
+    "packages",
+    "pacman",
+    "aur",
+    "flatpak",
+    "flathub",
+    "app store",
+    "install"
+  ]
 }

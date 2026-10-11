@@ -1,5 +1,5 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/davedes)
-<img width="1024" height="1536" alt="preview" src="https://github.com/user-attachments/assets/51fffdce-fb8f-4d90-bd1b-f076dda6e3e3" />
+<img width="540" alt="FossFetch panel" src="preview.png" />
 
 Like the plugin? ♥️ it on the Omarchy Marketplace to help others find it.
 # FossFetch
@@ -22,13 +22,20 @@ FossFetch — Browse open-source packages · Pacman + AUR + Flathub
 ## Features
 
 ### Search three ecosystems in one panel
-Three tabs, each backed by a live search (no stale curated lists):
+Three live-search tabs plus a curated alternatives tab:
 
 | Tab | Source | Live query |
 |-----|--------|------------|
 | **Pacman** | Arch repos (core / extra / multilib) | `pacman -Ss` |
 | **Flatpak** | Flathub | `flatpak search` + Flathub AppStream catalog |
 | **AUR** | Arch User Repository | AUR RPC `name-desc` search |
+| **Alternatives** | `alternatives.json` (bundled) | none — instant, fully offline |
+
+The **Alternatives** tab is the one that makes this an alternatives finder
+rather than a third search box: type the proprietary app you want to replace
+(`photoshop`, `autocad`, `excel`, `notion`, `slack`) and get the curated FOSS
+replacements with their real install sources. It is 100% local — no search box
+round trip, no network — so it opens instantly and works offline.
 
 Both the Pacman and Flatpak tabs support **natural-language category browsing**
 — enter a phrase like `video editing`, `browser`, `music`, `terminal` or
@@ -47,9 +54,11 @@ Results are enriched on the fly:
   local fallback that extracts an icon from installed packages via `pacman -Ql`.
 
 ### Arm-and-confirm install, per source
-Each card shows install buttons for the matching sources (a Pacman result may
-offer Pacman **and** a Flathub/AUR equivalent). First click **arms** ("Confirm?");
-a second click runs the real command in your terminal:
+Each card shows an install button for every source it can be installed from. A
+Pacman result usually carries **two**: the distro package *and* its Flathub
+equivalent, resolved from the local Flathub index — so you can pick the sandbox
+or the repo without searching again. First click **arms** ("Confirm?"); a second
+click runs the real command in your terminal:
 
 | Button | Command |
 |--------|---------|
@@ -61,14 +70,25 @@ The terminal is read from `$TERMINAL` / `$TERMINAL_CMD` and falls back to
 `kitty`. Pacman and Flatpak install attempts run independently, so arming one
 never conflicts with another.
 
+**Already installed is visible.** One batched `pacman -Qq` + `flatpak list`
+snapshot marks every card that is on the machine: the button becomes an inert
+"✓ Installed" pill and the card carries an `✓ Installed` chip, so a re-install is
+never a surprise. The snapshot is refreshed at most once a minute and again
+after an install is launched.
+
 ### Six toolbar icon designs
 The "Find App" pill in the bar restyles itself live. Choose from the options
 panel: **Current, Outline, Soft, Bold, Minimal, Icon** (a bare magnifying-glass
 glyph). The setting is pushed to the bar widget in real time and persists.
 
 ### Options panel (gear icon)
-- Toggle the **AUR** and **Flatpak** tabs on/off.
-- Choose the AUR install helper: **yay** or **paru**.
+- Toggle the **AUR**, **Flatpak** and **Alternatives** tabs on/off.
+- Clear the recent-search history.
+- Choose the AUR install helper: **yay** or **paru**. The helper is
+  **auto-detected** on open — if the saved one is not installed but `paru`,
+  `yay` or `pikaur` is, the panel follows the machine. If the chosen helper is
+  missing entirely the AUR buttons read "…missing" instead of failing silently
+  in a terminal.
 - Toolbar **icon design** picker.
 - Compact **"Buy Me a Coffee"** button with a small tick-box to hide it.
 
@@ -76,9 +96,13 @@ All options persist to
 `~/.local/state/omarchy/settings/davedes.fossfetch.json`.
 
 ### Built for the Omarchy shell
-- **Keyboard-first**: `Tab` cycles tabs, arrow keys move the selection,
-  `Enter` arms the highlighted card's install (a second press runs it),
-  `Esc` closes, `/` refocuses the search box.
+- **Recent searches**: the last 8 queries are kept in the options file and
+  offered as chips whenever the box is empty. Cleared from the same row.
+- **Match highlighting**: the matched run in a card title is accented.
+- **Keyboard-first**: `Tab` / `Shift+Tab` cycles tabs, `↑`/`↓` move the
+  selection, `Enter` arms the highlighted card's install (a second press runs
+  it), `Esc` closes, `/` refocuses the search box. `←`/`→` are left alone so
+  they edit the query like a normal text field.
 - **Theme-aware**: per-ecosystem accents (green = Pacman, cyan = AUR,
   blue = Flatpak, yellow = confirm state) are read from the active theme's
   `colors.toml`, so the panel blends with whatever theme is running.
@@ -123,7 +147,8 @@ widgets menu (or `~/.config/omarchy/shell.json`). Default section: `right`.
 
 ### 3. Bind the hotkey
 
-In `~/.config/hypr/bindings.lua`:
+In `~/.config/hypr/bindings.lua` (any combo you like — `F` is just a
+suggestion):
 
 ```lua
 o.bind("SUPER + ALT + F", "FossFetch", "omarchy-shell fossfetch toggle")
@@ -136,6 +161,12 @@ The panel can also be toggled over IPC with
 > (`quickshell:toggle_alt_finder`) is also available as an alternative to the
 > IPC binding — bind it with
 > `bind = SUPER ALT, F, global, quickshell:toggle_alt_finder`.
+
+### 4. Optional: CI
+
+`.github/workflows/ci.yml` runs the regression suite, `shellcheck`, the QML
+structural check and a manifest validation on every push — so a broken backend
+or a malformed QML file fails the build instead of the panel.
 
 ---
 
@@ -173,6 +204,7 @@ Options chosen in the panel are persisted to
 {
   "flatpak": true,
   "aur": true,
+  "alternatives": true,
   "aurHelper": "yay",
   "design": "current",
   "showCoffee": true
@@ -183,6 +215,7 @@ Options chosen in the panel are persisted to
 |-----|--------|---------|
 | `flatpak` | `true`/`false` | show the Flatpak tab |
 | `aur` | `true`/`false` | show the AUR tab |
+| `alternatives` | `true`/`false` | show the Alternatives tab |
 | `aurHelper` | `yay`/`paru` | AUR install command |
 | `design` | `current`, `outline`, `soft`, `bold`, `minimal`, `icon` | toolbar pill style |
 | `showCoffee` | `true`/`false` | show the "Buy Me a Coffee" button |
@@ -194,8 +227,10 @@ Options chosen in the panel are persisted to
 - Datastore indices live under `~/.cache/fossfetch/`:
   - `catalog/<version>/groups.tsv` + icons — built from the Arch AppStream
     catalog and refreshed when it is over 32 days old;
-  - `flathub/groups.tsv` + `flathub/appids.tsv` — built from Flathub's
-    AppStream catalog (same staleness window).
+  - `flathub/groups.tsv` + `flathub/appids.tsv` + `flathub/names.tsv` — built
+    from Flathub's AppStream catalog (same staleness window). `names.tsv` is the
+    complete app-id → display-name index used to resolve a package name to its
+    Flathub equivalent without shelling out to `flatpak search` per name.
 - Everything is resolved against public, first-party sources (Arch's AppStream
   mirror, Flathub's AppStream feed, the AUR RPC). No accounts, no telemetry, no
   third-party trackers.
@@ -209,6 +244,9 @@ Options chosen in the panel are persisted to
   and tar members are validated (no traversal, links, or size/count overflow).
 - Search results and enriched metadata are always fetched live; remove the
   cache directory at any time and it will be rebuilt on the next search.
+- **Searches never wait for a catalog refresh.** A stale index is served
+  immediately and rebuilt in the background; if a build fails, retries back off
+  exponentially (60 s → 6 h) instead of re-downloading on every keystroke.
 
 ---
 
@@ -227,15 +265,25 @@ Options chosen in the panel are persisted to
 | `flatpak_icon.py` | Name → Flathub app-id resolution for icons |
 | `groups.keywords` | Natural-language keyword → AppStream category table |
 | `alternatives.json` | Bundled curated metadata of FOSS alternatives to
-  proprietary apps |
+  proprietary apps (the Alternatives tab) |
+| `backend_pacman.sh` / `backend_flatpak.sh` | Search backends: group rows + `STATUS\|` frame |
+| `catalog_markers.sh` | Shared build-state markers + growing retry backoff |
+| `CHANGELOG.md` | Release notes |
 | `manifest.json` | Omarchy plugin manifest (bar-widget) |
+| `tests/security_test.py` | Regression suite (runs in CI) |
+| `tools/update_pins.sh` | Maintainer-only pin bump/verify (never called at runtime) |
+| `tools/qml_lint.py` | Structural QML check (delimiter balance, tabs, whitespace) |
 
 ---
 
 ## Known limitations
 
-- AUR install buttons are no-ops until `yay` or `paru` is actually installed;
-  pick the helper you have in Options.
+- The Alternatives tab is only as good as `alternatives.json`. Coverage is
+  broad for office/graphics/media but thin for video conferencing, design tools
+  and some music clients — a query with no curated entry shows
+  "No alternative found". Adding an entry is a few lines of JSON.
+- AUR install buttons need `yay`, `paru` or `pikaur`; the panel auto-detects
+  them and labels a missing helper, but cannot install one for you.
 - Flatpak results/installs require the `flathub` remote to be present.
 - First search on a tab may be slower while the AppStream/icon catalogs are
   downloaded once; afterwards everything is served from the local cache.

@@ -33,6 +33,7 @@ ICONS = os.path.join(PLUGIN, "appstream_icons.sh")
 GROUPS = os.path.join(PLUGIN, "appstream_groups.sh")
 STATE = os.path.join(PLUGIN, "appstream_state.py")
 FLATHUB = os.path.join(PLUGIN, "flathub_groups.py")
+FLATPAK_ICON = os.path.join(PLUGIN, "flatpak_icon.py")
 AUR = os.path.join(PLUGIN, "aur_search.py")
 PANEL = os.path.join(PLUGIN, "Panel.qml")
 PINS = os.path.join(PLUGIN, "appstream_pins.sh")
@@ -775,11 +776,37 @@ class FossFetchTests(unittest.TestCase):
             'FitText: Text {',     # component base (name + install labels)
         ):
             self.assertIn(probe, src)
-        # The rich-text sinks are the ones that matter: assert no Text element
-        # that binds remote metadata defaults to a rich-text format.
-        self.assertNotIn("textFormat: Text.RichText", src)
+        # Rich text is banned by default — package names and descriptions come
+        # from remote metadata and must never be parsed as markup. There is
+        # exactly ONE sanctioned exception, the card title, where the matched
+        # run is highlighted; it is safe only because every segment is escaped
+        # before the single tag this code adds. Assert the exception stays
+        # singular and stays escaped.
         self.assertNotIn("textFormat: Text.AutoText", src)
         self.assertNotIn("textFormat: Text.StyledText", src)
+        self.assertEqual(src.count("textFormat: Text.RichText"), 1,
+                         "exactly one rich-text sink is allowed (the card title)")
+        self.assertIn("text: root.highlightName(delegateRoot.name)", src)
+        # Escaping helper escapes all three metacharacters...
+        esc = src[src.index("function escapeRich"):]
+        esc = esc[:esc.index("\n  }")]
+        for ch in ('&', '<', '>'):
+            self.assertIn("/%s/g" % ch, esc)
+        # ...and highlightName runs every interpolated segment through it.
+        hl = src[src.index("function highlightName"):]
+        hl = hl[:hl.index("\n  }")]
+        # Five calls: two early-return guards (empty query, no match) plus the
+        # three interpolated segments — before, the match itself, and after.
+        self.assertEqual(hl.count("root.escapeRich("), 5)
+        for segment in ("root.escapeRich(n.slice(0, idx))",
+                        "root.escapeRich(n.slice(idx, idx + q.length))",
+                        "root.escapeRich(n.slice(idx + q.length))"):
+            self.assertIn(segment, hl)
+        self.assertNotIn("+ q +", hl)
+        self.assertNotIn("+ query +", hl)
+        # The bar widget renders nothing but the user's own label.
+        with open(os.path.join(PLUGIN, "BarWidget.qml"), encoding="utf-8") as fh:
+            self.assertNotIn("RichText", fh.read())
 
     def test_qml_uses_extracted_backends(self):
         # The pacman/flatpak STATUS|-frame logic lives in bundled scripts now,
@@ -790,6 +817,285 @@ class FossFetchTests(unittest.TestCase):
         self.assertNotIn("sh\", \"-c\", flatpakScript", src)
         self.assertIn("root.pacmanBackendScript", src)
         self.assertIn("root.flatpakBackendScript", src)
+
+    # ------------------------------------- argv hardening (package/app-id names)
+    def test_qml_never_interpolates_package_names_into_shell_text(self):
+        # Package names and Flathub app ids come from remote metadata. They must
+        # reach the shell as ARGV, never spliced into a `sh -c` script body.
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        forbidden = [
+            'names.join(" ")',      # spliced the whole batch into the script
+            '+ pkgs[k] +',          # spliced a package name into the script
+            '+ flats[m] +',         # spliced a Flathub app id into the script
+        ]
+        for needle in forbidden:
+            self.assertTrue(needle not in src, "Panel.qml still contains %r" % needle)
+        # The two generated scripts must iterate their ARGV...
+        required = [
+            'for p in \\"$@\\"',            # local icon lookup
+            'for e in \\"$@\\"',            # license lookup
+            'for e in \\"$@\\"; do',       # license loop head
+            '"fossfetch-icons"].concat(names)',      # $0 + real argv
+            '"fossfetch-licenses"].concat(args)',
+        ]
+        for needle in required:
+            self.assertTrue(needle in src, "Panel.qml is missing %r" % needle)
+
+    def test_lookup_local_icons_script_argv_is_injection_safe(self):
+        # End-to-end proof: a crafted "package name" must come out as data.
+        script = ('resolve(){ p="$1"; echo "I|$p|"; }\n'
+                  'for p in "$@"; do resolve "$p"; done')
+        marker = os.path.join(self.root, "pwned")
+        hostile = "evil; touch %s" % marker
+        p = subprocess.run(
+            ["/bin/sh", "-c", script, "fossfetch-icons", hostile],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.stdout.strip(), "I|%s|" % hostile)
+        self.assertFalse(os.path.exists(marker), "argv quoting leaked a command")
+
+    # ------------------------------------------------- Flathub name index (B1)
+    def test_flatpak_icon_resolves_from_local_index_without_network(self):
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "flathub"))
+        with open(os.path.join(cache, "flathub", "names.tsv"), "w") as fh:
+            fh.write("org.mozilla.firefox\tFirefox\n")
+            fh.write("org.libreoffice.LibreOffice\tLibreOffice\n")
+            fh.write("com.brave.Browser\tBrave\n")
+            fh.write("org.kde.krita.Sdk\tKrita SDK\n")  # a variant: must be skipped
+        # No `flatpak` on PATH and no network: everything must come from the
+        # index. This is the regression guard for the 6.7 s-per-5-names path.
+        p = subprocess.run(
+            [sys.executable, FLATPAK_ICON, "--cache", cache, "--",
+             "firefox", "firefox-esr", "libreoffice-fresh", "brave", "krita", "bash"],
+            capture_output=True, text=True, timeout=30,
+            env=dict(self.env(), PATH="/nonexistent"))
+        got = {}
+        for line in p.stdout.strip().split("\n"):
+            parts = line.split("|")
+            got[parts[1]] = parts[2]
+        self.assertEqual(got["firefox"], "org.mozilla.firefox")
+        # Arch renames are stripped before the lookup.
+        self.assertEqual(got["firefox-esr"], "org.mozilla.firefox")
+        self.assertEqual(got["libreoffice-fresh"], "org.libreoffice.LibreOffice")
+        self.assertEqual(got["brave"], "com.brave.Browser")
+        self.assertEqual(got["bash"], "")
+
+    def test_flatpak_icon_skips_variant_bundles(self):
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "flathub"))
+        with open(os.path.join(cache, "flathub", "names.tsv"), "w") as fh:
+            fh.write("org.kde.krita.Locale\tKrita\n")
+            fh.write("org.gimp.GIMP.Sdk\tGIMP\n")
+        p = subprocess.run(
+            [sys.executable, FLATPAK_ICON, "--cache", cache, "--", "krita", "gimp"],
+            capture_output=True, text=True, timeout=30,
+            env=dict(self.env(), PATH="/nonexistent"))
+        self.assertEqual(p.stdout.strip(), "N|krita|\nN|gimp|")
+
+    def test_flathub_ensure_writes_complete_name_index(self):
+        xml = (b"<components>"
+               b'<component type="desktop-application">'
+               b"<id>org.categorised.App</id><name>Categorised</name>"
+               b"<category>Office</category>"
+               b"</component>"
+               b'<component type="desktop-application">'
+               b"<id>org.plain.App</id><name>Plain</name>"
+               b"</component>"
+               b"</components>")
+        self.srv.add("/flathub/appstream.xml.gz", gzip.compress(xml))
+        cache = os.path.join(self.root, "cache")
+        rc, out, err = self.run_flathub({
+            "FLATHUB_APPSTREAM_URL": self.srv.url("/flathub/appstream.xml.gz")})
+        self.assertEqual(rc, 0, err)
+        # The uncategorised app must be in names.tsv — groups.tsv cannot hold it,
+        # which is exactly why flatpak_icon.py needs a separate index.
+        names_path = os.path.join(cache, "flathub", "names.tsv")
+        with open(names_path, encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("org.categorised.App\tCategorised", body)
+        self.assertIn("org.plain.App\tPlain", body)
+        groups = open(os.path.join(cache, "flathub", "groups.tsv"), encoding="utf-8").read()
+        self.assertNotIn("org.plain.App", groups)
+
+    # --------------------------------- non-blocking / backed-off catalog (B2,B3)
+    def test_flathub_resolve_serves_stale_index_without_any_download(self):
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "flathub"))
+        with open(os.path.join(cache, "flathub", "groups.tsv"), "w") as fh:
+            fh.write("Office\torg.libreoffice.LibreOffice\tLibreOffice\tSuite\t1.0\t1\n")
+        with open(os.path.join(cache, "flathub", "names.tsv"), "w") as fh:
+            fh.write("org.libreoffice.LibreOffice\tLibreOffice\n")
+        # Make the freshness marker ancient so the index counts as stale.
+        old = os.path.join(cache, "flathub", "current")
+        open(old, "w").close()
+        os.utime(old, (0, 0))
+        # No route is registered, so ANY request would 404 and be recorded.
+        e = self.env()
+        e["FLATHUB_APPSTREAM_URL"] = self.srv.url("/flathub/appstream.xml.gz")
+        p = subprocess.run(
+            [sys.executable, FLATHUB, "resolve", cache, "office"],
+            capture_output=True, text=True, timeout=30, env=e)
+        # The stale index is still served...
+        self.assertIn("org.libreoffice.LibreOffice", p.stdout)
+        # ...and the rebuild ran detached rather than inline, so this call did
+        # not wait on it (the fixture would have recorded the attempt here).
+        self.assertEqual(self.srv.requests, [],
+                         "resolve must not block on a catalog rebuild")
+
+    def test_flathub_ensure_backs_off_after_a_failed_build(self):
+        self.srv.add("/flathub/appstream.xml.gz", b"not-gzip-at-all")
+        cache = os.path.join(self.root, "cache")
+        e = self.env()
+        e["FLATHUB_APPSTREAM_URL"] = self.srv.url("/flathub/appstream.xml.gz")
+        cmd = [sys.executable, FLATHUB, "ensure", cache]
+        first = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=e)
+        self.assertNotEqual(first.returncode, 0, "a bad archive must fail the build")
+        after_first = len(self.srv.requests)
+        self.assertGreater(after_first, 0)
+        second = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=e)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("backing off", second.stderr)
+        # The retry must not have re-downloaded anything.
+        self.assertEqual(len(self.srv.requests), after_first)
+
+    def test_flathub_backoff_is_cleared_by_a_successful_build(self):
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "flathub"))
+        with open(os.path.join(cache, "flathub", ".failed"), "w") as fh:
+            fh.write("")
+        self.srv.add("/flathub/appstream.xml.gz",
+                     gzip.compress(b"<components/>"))
+        # An EMPTY marker is what a pre-backoff version of this plugin left
+        # behind; it must not read as a failure and lock the index out.
+        rc, out, err = self.run_flathub({
+            "FLATHUB_APPSTREAM_URL": self.srv.url("/flathub/appstream.xml.gz"),
+            "FOSSFETCH_CATALOG_BACKOFF_SECONDS": "86400",
+            "FOSSFETCH_CATALOG_BACKOFF_MAX_SECONDS": "86400"})
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(cache, "flathub", ".failed")))
+
+    def test_flathub_backoff_grows_with_repeated_failures(self):
+        # A fixed maximum would lock a user out for hours after a 30-second
+        # outage; the window must start at the base and double per failure.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("flathub_groups", FLATHUB)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cache = os.path.join(self.root, "cache")
+        os.makedirs(os.path.join(cache, "flathub"))
+        # No failure recorded yet: nothing to back off from.
+        self.assertEqual(mod.backoff_window(cache), 0.0)
+        windows = []
+        for _ in range(5):
+            mod.mark_failed(cache)
+            windows.append(mod.backoff_window(cache))
+        self.assertEqual(windows[0], 60.0)      # base * 2**0
+        self.assertEqual(windows[1], 120.0)
+        self.assertEqual(windows[2], 240.0)
+        self.assertEqual(windows[4], 960.0)
+        # Never above the cap, however many consecutive failures.
+        for _ in range(20):
+            mod.mark_failed(cache)
+        self.assertLessEqual(mod.backoff_window(cache), 21600.0)
+        # And a success clears it entirely.
+        mod._drop(cache, ".failed")
+        self.assertEqual(mod.backoff_window(cache), 0.0)
+
+    def test_flathub_catalogue_shape_is_handled_correctly(self):
+        # Guards the streaming parser against the catalogue quirks that a naive
+        # element lookup silently gets wrong:
+        #   * <name>/<summary> repeat per language as xml:lang — the untranslated
+        #     one must win, or an app is indexed under its Arabic name;
+        #   * <release> lives inside <releases>, <category> inside <categories>,
+        #     so direct-child lookups find nothing;
+        #   * entities must be decoded, not written through raw.
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<components version="0.8" origin="flatpak">'
+            '<component type="desktop-application">'
+            '<id>com.example.Tools</id>'
+            '<name>Example Tools</name>'
+            '<name xml:lang="ar">أدوات</name>'
+            '<summary>A useful tool</summary>'
+            '<summary xml:lang="pl">Narzędzie</summary>'
+            '<categories><category>Utility</category>'
+            '<category>Development</category></categories>'
+            '<releases>'
+            '<release timestamp="1700000000" version="1.2.3"/>'
+            '<release timestamp="1600000000" version="1.2.2"/>'
+            '</releases>'
+            '</component>'
+            '<component type="desktop">'
+            '<id>com.example.Legacy</id>'
+            '<name>Rock &amp; Roll</name>'
+            '<categories><category>Audio</category></categories>'
+            '</component>'
+            '</components>'
+        ).encode("utf-8")
+        self.srv.add("/flathub/appstream.xml.gz", gzip.compress(xml))
+        cache = os.path.join(self.root, "cache")
+        rc, out, err = self.run_flathub({
+            "FLATHUB_APPSTREAM_URL": self.srv.url("/flathub/appstream.xml.gz")})
+        self.assertEqual(rc, 0, err)
+
+        def tsv(name):
+            path = os.path.join(cache, "flathub", name)
+            with open(path, encoding="utf-8") as fh:
+                return [line.rstrip("\n").split("\t") for line in fh if line.strip()]
+
+        names = {r[0]: r[1] for r in tsv("names.tsv")}
+        self.assertEqual(names["com.example.Tools"], "Example Tools")
+        self.assertEqual(names["com.example.Legacy"], "Rock & Roll")
+
+        groups = {(r[0], r[1]): r for r in tsv("groups.tsv")}
+        self.assertIn(("Utility", "com.example.Tools"), groups)
+        self.assertIn(("Development", "com.example.Tools"), groups)
+        self.assertIn(("Audio", "com.example.Legacy"), groups)
+        row = groups[("Utility", "com.example.Tools")]
+        self.assertEqual(row[2], "Example Tools")     # name, not the translation
+        self.assertEqual(row[3], "A useful tool")     # summary, untranslated
+        self.assertEqual(row[4], "1.2.3")             # newest release
+        self.assertEqual(row[5], "1700000000")        # newest release date
+
+        appids = {r[0]: r[1] for r in tsv("appids.tsv")}
+        self.assertEqual(appids["com.example.Tools"], "1700000000")
+
+    def test_flathub_truncated_catalogue_fails_without_writing_an_index(self):
+        # A partial download must not leave a half-built index behind that
+        # later searches would treat as complete.
+        self.srv.add("/flathub/appstream.xml.gz", gzip.compress(
+            b'<components><component type="desktop-application">'
+            b"<id>com.example.Partial</id>"
+            b"<categories><category>Utility</category></categories>"
+            b"</component></components>"))
+        cache = os.path.join(self.root, "cache")
+        rc, out, err = self.run_flathub({
+            "FLATHUB_APPSTREAM_URL": self.srv.url("/flathub/appstream.xml.gz")})
+        self.assertEqual(rc, 0, err)
+        # Rebuild over a deliberately corrupt archive and confirm the previous
+        # index is neither replaced nor left half-written.
+        self.srv.add("/flathub/appstream.xml.gz", gzip.compress(b"<components><comp"))
+        os.utime(os.path.join(cache, "flathub", "current"), (0, 0))
+        os.utime(os.path.join(cache, "flathub", "groups.tsv"), (0, 0))
+        rc2, out2, err2 = self.run_flathub({
+            "FLATHUB_APPSTREAM_URL": self.srv.url("/flathub/appstream.xml.gz")})
+        self.assertNotEqual(rc2, 0)
+        with open(os.path.join(cache, "flathub", "groups.tsv"), encoding="utf-8") as fh:
+            self.assertIn("com.example.Partial", fh.read())
+
+    # ------------------------------------------------------- keyboard / caret
+    def test_qml_leaves_left_right_to_the_text_caret(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Arrow keys were hijacked for tab switching, which made the caret
+        # unusable inside the search box.
+        self.assertNotIn("Keys.onLeftPressed", src)
+        self.assertNotIn("Keys.onRightPressed", src)
+        # Tab must still cycle tabs while the search field has focus, which
+        # means it is handled on the field itself (the key catcher is blocked).
+        self.assertIn("Qt.Key_Tab", src)
+        self.assertIn("Qt.Key_Backtab", src)
 
 
 def json_dumps(obj):
