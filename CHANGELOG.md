@@ -12,13 +12,15 @@ already out of date, which is the other half of what a package manager is for.
 ### Added
 
 - **Result sorting.** `Ctrl+S` (or the label above the results) cycles
-  Relevance → Popularity → Updated → Name. Relevance stays the default and is
-  deliberately *not* re-applied: the backends already append in relevance
-  order, and that ranking knows your query in a way no stored key can
-  reproduce — sorting by it would throw the only useful signal away. Name
-  sorting is case-folded, so capitals interleave with lowercase instead of
-  sorting as a separate block, and every mode falls back to name on a tie so
-  two rows can never trade places between runs.
+  Relevance → Popularity → Updated → Name. Relevance is the default and is the
+  order the backends produced — the only ranking that knows your query, since
+  no field on a row records it. It is therefore captured as each row's
+  insertion position rather than re-derived, so it can be returned to at any
+  point in the cycle. Name sorting is case-folded, so capitals interleave with
+  lowercase instead of sorting as a separate block, and every mode falls back
+  to name on a tie so two rows can never trade places between runs. The cycle
+  only offers modes the current results can actually order by, so it never
+  offers a mode that would silently do nothing.
 - **A "Hide installed" filter** (`Ctrl+H`). Searching for a browser when you
   already run Firefox should not bury the alternatives under what you have.
   It counts what it suppresses, so a search whose only matches are installed

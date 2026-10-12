@@ -115,8 +115,10 @@ The row above the results sorts them. **Ctrl+S** cycles four modes:
 | **Updated** | Newest build first; a row with no date sorts last |
 | **Name** | A → Z, case-insensitive |
 
-Relevance is the default precisely because sorting cannot reproduce it: only
-the backends know your query. The other three reorder what they found.
+Relevance is the default because it is the backend's own ranking, and it is
+captured as each row's insertion position rather than recomputed — only the
+backends know your query, so sorting by name or popularity would throw that
+signal away. The other three reorder what they found.
 
 **Ctrl+H** (or the **Hide installed** pill) drops packages you already have. A
 search whose matches are all installed says so, and tells you how many, rather
