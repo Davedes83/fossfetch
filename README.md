@@ -106,14 +106,20 @@ usually still needed by something else. Both actions open a confirmation dialog
 naming the exact package.
 
 ### Sorting and filtering
-The row above the results sorts them. **Ctrl+S** cycles four modes:
+The row above the results sorts them. **Ctrl+S** cycles five modes:
 
 | Mode | Order |
 | --- | --- |
 | **Relevance** (default) | The backend's own ranking — exact name hit, then prefix, substring, fuzzy, with AppStream categories boosted |
+| **Installed first** | Packages you already have lead; both groups keep their relevance order |
 | **Popularity** | AUR Popularity (the share of AUR users running the package) first |
 | **Updated** | Newest build first; a row with no date sorts last |
 | **Name** | A → Z, case-insensitive |
+
+"Installed first" only appears in the cycle when the results contain both
+installed and not-installed packages — otherwise it would change nothing — and
+it is withheld while **Hide installed** is on, for the same reason. Every mode
+shown is one that can actually reorder what is on screen.
 
 Relevance is the default because it is the backend's own ranking, and it is
 captured as each row's insertion position rather than recomputed — only the

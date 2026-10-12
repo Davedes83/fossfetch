@@ -189,6 +189,51 @@ eq(names(original), inputCopy, "sortRows does not mutate its input array");
 eq(names(Model.sortRows([], "name")), [], "an empty result set sorts to an empty array");
 eq(names(Model.sortRows(null, "name")), [], "a null result set sorts to an empty array");
 
+// ------------------------------------------------------- installed-first sort
+
+// The partition decides only which rows LEAD. Within each group the backend's
+// relevance ranking has to survive, or sorting by "installed" would silently
+// alphabetise the whole list while claiming to have only moved the installed
+// ones up. firefox outranks angelfish here (_order 0 vs 2), the opposite of
+// how a name sort would rank them, so this fails loudly if it falls through to
+// byName.
+eq(names(Model.sortRows([
+    {name: "firefox", _order: 0, installedPacman: "1"},
+    {name: "chromium", _order: 1},
+    {name: "angelfish", _order: 2, installedPacman: "1"}
+], "installed")),
+   ["firefox", "angelfish", "chromium"],
+   "installed rows lead, each group keeping backend relevance order");
+
+// Installed by any source counts, including a package offered by both a repo
+// and the AUR -- that is one installed package, not two.
+eq(names(Model.sortRows([
+    {name: "a-missing", _order: 0},
+    {name: "z-either", _order: 1, installedPacman: "1", installedAur: "1"}
+], "installed")),
+   ["z-either", "a-missing"],
+   "installed through any one source still leads");
+
+// Same silent-no-op rule as popularity/updated: a partition with only one
+// group is not a sort, so the order must be left exactly as it was.
+eq(names(Model.sortRows([
+    {name: "zeta", _order: 0, installedPacman: "1"},
+    {name: "alpha", _order: 1, installedPacman: "1"}
+], "installed")),
+   ["zeta", "alpha"],
+   "all rows installed leaves the order alone");
+eq(names(Model.sortRows([
+    {name: "zeta", _order: 0},
+    {name: "alpha", _order: 1}
+], "installed")),
+   ["zeta", "alpha"],
+   "no rows installed leaves the order alone");
+
+eq(Model.mixedInstalled([{installedPacman: "1"}, {}]), true, "a split set is mixed");
+eq(Model.mixedInstalled([{installedPacman: "1"}, {installedPacman: "1"}]), false, "all installed is not mixed");
+eq(Model.mixedInstalled([{}, {}]), false, "none installed is not mixed");
+eq(Model.mixedInstalled([]), false, "an empty set is not mixed");
+
 // ----------------------------------------------------------------- sort keys
 
 eq(Model.popularityKey("0.057"), 0.057, "popularity key parses the RPC fraction");
@@ -206,7 +251,7 @@ eq(Model.updatedKey(""), -1, "missing build date sorts last");
 // while Node reaches it through module.exports. Exposing the array directly only
 // worked in Node and was undefined in the panel.
 eq(typeof Model.sortModes, "function", "sortModes is exposed as a function");
-eq(Model.sortModes().join(","), "relevance,popularity,updated,name", "the cycle order is stable");
+eq(Model.sortModes().join(","), "relevance,installed,popularity,updated,name", "the cycle order is stable");
 // Every mode must be handled by the sorter, and every declared mode must be one
 // sortRows actually understands.
 eq(Model.sortModes().filter(function (m) { return m !== "relevance"; })

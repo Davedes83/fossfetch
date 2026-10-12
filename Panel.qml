@@ -178,6 +178,7 @@ Panel {
   property int orderSeq: 0
 
   function sortLabel(m) {
+    if (m === "installed") return "Installed first"
     if (m === "popularity") return "Popularity"
     if (m === "updated") return "Updated"
     if (m === "name") return "Name"
@@ -200,13 +201,24 @@ Panel {
   function computeSortModes() {
     var hasPop = false
     var hasDate = false
-    for (var i = 0; i < filteredModel.count && !(hasPop && hasDate); i++) {
+    var hasInstalled = false
+    var hasMissing = false
+    for (var i = 0; i < filteredModel.count; i++) {
       var r = filteredModel.get(i)
       if (!r) continue
       if (!hasPop && Model.popularityKey(r.aurPopularity) >= 0) hasPop = true
       if (!hasDate && Model.updatedKey(r.updated) >= 0) hasDate = true
+      // Partition flags, tracked apart: a row already accounted for must not
+      // fall through to the other branch and claim to be the opposite.
+      if (Model.isInstalledRow(r)) { if (!hasInstalled) hasInstalled = true }
+      else if (!hasMissing) hasMissing = true
     }
     var out = ["relevance"]
+    // "Installed first" partitions the rows, so it only means anything when
+    // both groups are present -- and never while "Hide installed" is on, which
+    // has already removed one of them. Offering it in those states is the
+    // silent no-op this list exists to avoid.
+    if (hasInstalled && hasMissing && !root.hideInstalled) out.push("installed")
     if (hasPop) out.push("popularity")
     if (hasDate) out.push("updated")
     out.push("name")

@@ -350,7 +350,7 @@ function needsUpdate(avail, inst) {
 // insertion order, sorting by name throws the backend's ranking away and
 // "Relevance" becomes a no-op that can never undo the change, which reads to
 // the user as a sort that silently does nothing.
-var SORT_MODES = ["relevance", "popularity", "updated", "name"];
+var SORT_MODES = ["relevance", "installed", "popularity", "updated", "name"];
 
 // Exposed as a FUNCTION, not read straight off the array. A `.js` imported into
 // QML with `import "Model.js" as Model` exposes the script's top-level vars and
@@ -437,6 +437,38 @@ function anyField(rows, key) {
     return false;
 }
 
+// True only when the rows actually SPLIT into installed and not-installed.
+//
+// "Installed first" is a partition, not a ranking, so unlike popularity or
+// updated there is no partial data to reason about: it is meaningful only
+// when both groups are present. If every row is installed, or none is, the
+// mode would return the list untouched while wearing a label promising
+// otherwise — which is the same silent no-op as a sort whose field is
+// missing everywhere.
+function mixedInstalled(rows) {
+    var seenInstalled = false, seenMissing = false;
+    for (var i = 0; i < rows.length; i++) {
+        if (isInstalledRow(rows[i])) seenInstalled = true;
+        else seenMissing = true;
+        if (seenInstalled && seenMissing) return true;
+    }
+    return false;
+}
+
+// Installed rows first, but the two groups keep the backend's own ranking
+// rather than being alphabetised.
+//
+// The partition decides only WHICH rows lead; it says nothing about order
+// within a group. Falling back to byName here would quietly discard the
+// relevance ranking for the whole list — sorting by "installed" would rename
+// your results while claiming only to move the ones you already have.
+function byInstalled(a, b) {
+    var ai = isInstalledRow(a) ? 1 : 0;
+    var bi = isInstalledRow(b) ? 1 : 0;
+    if (ai !== bi) return bi - ai;
+    return byOrder(a, b);
+}
+
 // Reorder a result set for a sort mode. Returns a NEW array; the caller's is
 // never mutated, so the caller can keep the pre-sort order for comparison.
 //
@@ -458,6 +490,8 @@ function sortRows(rows, mode) {
         if (anyField(arr, "updated")) arr.sort(byUpdated);
     } else if (m === "name") {
         arr.sort(byName);
+    } else if (m === "installed") {
+        if (mixedInstalled(arr)) arr.sort(byInstalled);
     }
     return arr;
 }
@@ -502,6 +536,7 @@ if (typeof module !== "undefined" && module.exports) {
         updatedKey: updatedKey,
         popularityKey: popularityKey,
         isInstalledRow: isInstalledRow,
+        mixedInstalled: mixedInstalled,
         passesFilter: passesFilter
     };
 }

@@ -12,7 +12,13 @@ already out of date, which is the other half of what a package manager is for.
 ### Added
 
 - **Result sorting.** `Ctrl+S` (or the label above the results) cycles
-  Relevance → Popularity → Updated → Name. Relevance is the default and is the
+  Relevance → Installed first → Popularity → Updated → Name. "Installed first"
+  partitions the results without ranking them: it decides which rows lead, and
+  the two groups keep the backend's relevance order, so it never quietly
+  alphabetises the list while claiming to have only moved things you already
+  have. It is offered only when the results actually split — all installed or
+  none installed makes it a no-op — and never while "Hide installed" is on,
+  which has already removed one of the groups. Relevance is the default and is the
   order the backends produced — the only ranking that knows your query, since
   no field on a row records it. It is therefore captured as each row's
   insertion position rather than re-derived, so it can be returned to at any
