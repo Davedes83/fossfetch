@@ -33,13 +33,25 @@ function isInsideCache(path, cacheDir) {
 
 // ------------------------------------------------------------------ dates
 
+var MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+var MONTH_INDEX = {Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+                   Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11};
+
+// Parse either an AUR epoch (seconds) or a pacman build-date line into a Date,
+// or null when the input is not a date at all.
+//
+// Split out of fmtUpdated so the "Updated" sort orders by the SAME instant the
+// card displays. Sorting on the formatted string instead would compare "1 Feb
+// 2024" against "11 Feb 2024" as text, putting single-digit days last.
+//
 // pacman prints Build Date in its OWN timezone; AUR RPC LastModified is an
 // absolute epoch. Both are rendered in the viewer's local calendar day. (The
 // original parsed pacman's local-time fields back through Date.UTC, which
 // shifted the date by a day for every user west of Greenwich.)
-function fmtUpdated(raw) {
-    var s = String(raw || "").trim();
-    if (!s) return "";
+function parseDate(raw) {
+    var s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return null;
     var d = null;
     if (/^\d+$/.test(s)) {
         // AUR LastModified is an absolute instant, so local time is correct.
@@ -47,18 +59,23 @@ function fmtUpdated(raw) {
     } else {
         var m = s.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d{1,2}) ([A-Z][a-z]{2}) (\d{4})/);
         if (m) {
-            var months = {Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
-                          Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11};
-            var mn = months[m[2]];
-            if (mn !== undefined) d = new Date(Number(m[3]), mn, Number(m[1]));
+            var mn = MONTH_INDEX[m[2]];
+            if (mn === undefined) return null;
+            d = new Date(Number(m[3]), mn, Number(m[1]));
         } else {
             var iso = s.match(/(\d{4})-(\d{2})-(\d{2})/);
             if (iso) d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
         }
     }
-    if (!d || isNaN(d.getTime())) return s;
-    var labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return d.getDate() + " " + labels[d.getMonth()] + " " + d.getFullYear();
+    return (d && !isNaN(d.getTime())) ? d : null;
+}
+
+function fmtUpdated(raw) {
+    var s = String(raw === "" || raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return "";
+    var d = parseDate(s);
+    if (!d) return s;
+    return d.getDate() + " " + MONTH_LABELS[d.getMonth()] + " " + d.getFullYear();
 }
 
 // ---------------------------------------------------- rich-text escaping
@@ -321,11 +338,110 @@ function needsUpdate(avail, inst) {
     return compareVersions(available, installed) === 1;
 }
 
+// ---------------------------------------------------------- sort and filter
+
+// Sort modes in cycle order (Ctrl+S walks this list).
+//
+// "relevance" is deliberately NOT a comparator. Each backend already appends
+// its results in relevance order — exact name hit, then prefix, then substring,
+// then fuzzy, with AppStream category members boosted — and the append order IS
+// that ranking. Sorting it again would throw away the only signal that knows
+// about the user's actual query, so this mode returns the list untouched.
+var SORT_MODES = ["relevance", "popularity", "updated", "name"];
+
+// Exposed as a FUNCTION, not read straight off the array. A `.js` imported into
+// QML with `import "Model.js" as Model` exposes the script's top-level vars and
+// functions as the namespace — `module.exports` only exists for the Node test
+// harness. So the panel must call this; reading `Model.SORT_MODES` works in Node
+// and is silently `undefined` in QML, which is exactly how the settings load
+// ended up throwing inside its try/catch and quietly dropping every preference.
+function sortModes() { return SORT_MODES; }
+
+// Comparable key for the "Updated" sort, or -1 when the row has no date.
+// Missing sorts LAST, not first: a row with no build time is not the newest
+// package, and putting it on top would make an absent field look like a claim.
+function updatedKey(raw) {
+    var d = parseDate(raw);
+    return d ? d.getTime() : -1;
+}
+
+// Comparable key for AUR Popularity, which the RPC already reports as a 0..1
+// fraction of AUR users running the package. -1 for missing so that every
+// pacman and Flathub row — and any AUR row whose payload omitted the field —
+// sinks below rows that carry a real measurement instead of tying with them.
+function popularityKey(raw) {
+    var s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (s === "") return -1;
+    var n = parseFloat(s);
+    return isNaN(n) ? -1 : n;
+}
+
+function rowName(row) {
+    return String(row && row.name ? row.name : "").toLowerCase();
+}
+
+// Name ascending, case-folded. The default String comparison puts every
+// capitalised name ("Zoom") ahead of every lowercase one ("apache"), which
+// reads as a broken alphabet to anyone scanning the column.
+function byName(a, b) {
+    var an = rowName(a), bn = rowName(b);
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return 0;
+}
+
+function byPopularity(a, b) {
+    var d = popularityKey(b.aurPopularity) - popularityKey(a.aurPopularity);
+    return d !== 0 ? d : byName(a, b);
+}
+
+function byUpdated(a, b) {
+    var d = updatedKey(b.updated) - updatedKey(a.updated);
+    return d !== 0 ? d : byName(a, b);
+}
+
+// Reorder a result set for a sort mode. Returns a NEW array; the caller's is
+// never mutated, so the caller can keep the pre-sort order for comparison.
+//
+// Every comparator ends in byName, so rows that tie on the sort key fall back
+// to a stable alphabetical order instead of whatever order the engine's sort
+// happened to leave them in. Without that, two rows with no build date would
+// be free to swap places between two otherwise identical runs.
+function sortRows(rows, mode) {
+    var arr = [];
+    var n = rows ? rows.length : 0;
+    for (var i = 0; i < n; i++) arr.push(rows[i]);
+    var m = String(mode === undefined || mode === null ? "relevance" : mode);
+    if (m === "popularity") arr.sort(byPopularity);
+    else if (m === "updated") arr.sort(byUpdated);
+    else if (m === "name") arr.sort(byName);
+    // "relevance", plus anything unrecognised, falls through to the backend's
+    // own ranking rather than inventing one.
+    return arr;
+}
+
+// Installed by ANY of the three sources. A package offered by both a repo and
+// the AUR is one installed package, not two — otherwise "hide installed" would
+// leave a duplicate card behind for the package you just filtered out.
+function isInstalledRow(row) {
+    if (!row) return false;
+    return String(row.installedPacman || "") === "1"
+        || String(row.installedAur || "") === "1"
+        || String(row.installedFlatpak || "") === "1";
+}
+
+function passesFilter(row, opts) {
+    if (!row) return false;
+    if (opts && opts.hideInstalled && isInstalledRow(row)) return false;
+    return true;
+}
+
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         isSafeWebUrl: isSafeWebUrl,
         isInsideCache: isInsideCache,
         fmtUpdated: fmtUpdated,
+        parseDate: parseDate,
         escapeRich: escapeRich,
         highlightName: highlightName,
         statusDetail: statusDetail,
@@ -337,6 +453,12 @@ if (typeof module !== "undefined" && module.exports) {
         matchReasonFor: matchReasonFor,
         splitVersion: splitVersion,
         compareVersions: compareVersions,
-        needsUpdate: needsUpdate
+        needsUpdate: needsUpdate,
+        sortModes: sortModes,
+        sortRows: sortRows,
+        updatedKey: updatedKey,
+        popularityKey: popularityKey,
+        isInstalledRow: isInstalledRow,
+        passesFilter: passesFilter
     };
 }

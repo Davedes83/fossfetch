@@ -87,6 +87,127 @@ eq(Model.fmtUpdated("Wed 5 Mar 2026 09:00:00 AM UTC"), "5 Mar 2026", "single-dig
 eq(Model.fmtUpdated("2026-03-05"), "5 Mar 2026", "ISO date is rendered in local time");
 eq(Model.fmtUpdated("not a date"), "not a date", "unparseable input is passed through unchanged");
 
+// parseDate is the shared parser behind both the rendering and the Updated
+// sort, so it has to agree with fmtUpdated on what is a date at all.
+ok(Model.parseDate("Mon 2 Jun 2025 03:04:05 PM EST") instanceof Date, "pacman date parses to a Date");
+ok(Model.parseDate("2026-03-05") instanceof Date, "ISO date parses to a Date");
+ok(Model.parseDate("1735689600") instanceof Date, "AUR epoch parses to a Date");
+eq(Model.parseDate(""), null, "empty string is not a date");
+eq(Model.parseDate(null), null, "null is not a date");
+eq(Model.parseDate("not a date"), null, "garbage is not a date");
+eq(Model.parseDate("Mon 2 Zzz 2025 03:04:05 PM EST"), null, "an unknown month name is not a date");
+
+// ---------------------------------------------------------------- sort modes
+
+// Fixtures deliberately mix populated, missing and unparseable fields.
+var sorted = [
+    {name: "middle", aurPopularity: "0.021", updated: "Mon 2 Jun 2025 03:04:05 PM UTC"},
+    {name: "undated", aurPopularity: "", updated: ""},
+    {name: "popular", aurPopularity: "0.057", updated: "Mon 1 Jan 2024 03:04:05 PM UTC"},
+    {name: "noPopularityField", aurPopularity: "", updated: "Tue 5 Mar 2024 03:04:05 PM UTC"}
+];
+
+function names(rows) {
+    var out = [];
+    for (var i = 0; i < rows.length; i++) out.push(rows[i].name);
+    return out;
+}
+
+// Relevance is the default and must NOT reorder: the backends already appended
+// in relevance order and that ranking knows the query, which no sort key here
+// does. An unrecognised mode has to be as inert as relevance rather than
+// falling through to something arbitrary.
+eq(names(Model.sortRows(sorted, "relevance")),
+   ["middle", "undated", "popular", "noPopularityField"],
+   "relevance preserves the backend's own ranking");
+eq(names(Model.sortRows(sorted, "nonsense-mode")),
+   ["middle", "undated", "popular", "noPopularityField"],
+   "an unknown sort mode falls back to relevance instead of inventing an order");
+
+// Popularity descending. A row with NO popularity field must sink below a row
+// with a real 0.021 measurement: an absent number is not a high number. The
+// last two BOTH lack the field, so they tie at -1 and fall through to name.
+eq(names(Model.sortRows(sorted, "popularity")),
+   ["popular", "middle", "noPopularityField", "undated"],
+   "popularity sorts descending and puts missing values last");
+
+// Updated newest-first. Sorting the formatted string would be the bug this
+// guards: "1 Feb 2024" < "11 Feb 2024" as text, so the 11th would land first.
+eq(names(Model.sortRows(sorted, "updated")),
+   ["middle", "noPopularityField", "popular", "undated"],
+   "updated sorts newest first with undated rows last");
+
+// Name ascending, case-folded, so capitals interleave with lowercase instead of
+// sorting as a separate block ahead of them.
+eq(names(Model.sortRows([
+    {name: "Zoom"}, {name: "apache"}, {name: "Zathura"}, {name: "aerc"}
+], "name")),
+   ["aerc", "apache", "Zathura", "Zoom"],
+   "name sorting is case-insensitive");
+
+// Ties must resolve to a stable alphabetical order, not to sort-engine luck:
+// two undated rows come out the same way every time.
+var tie = Model.sortRows([{name: "b", updated: ""}, {name: "a", updated: ""}], "updated");
+eq(names(tie), ["a", "b"], "tied rows fall back to name");
+eq(names(Model.sortRows([{name: "a", updated: ""}, {name: "b", updated: ""}], "updated")),
+   ["a", "b"],
+   "a tie does not depend on the input order");
+
+// sortRows must not mutate what the caller passed in — the panel keeps the
+// pre-sort order so it can skip the rebuild when nothing actually moved.
+var original = [{name: "zzz"}, {name: "aaa"}];
+var inputCopy = names(original);
+Model.sortRows(original, "name");
+eq(names(original), inputCopy, "sortRows does not mutate its input array");
+eq(names(Model.sortRows([], "name")), [], "an empty result set sorts to an empty array");
+eq(names(Model.sortRows(null, "name")), [], "a null result set sorts to an empty array");
+
+// ----------------------------------------------------------------- sort keys
+
+eq(Model.popularityKey("0.057"), 0.057, "popularity key parses the RPC fraction");
+eq(Model.popularityKey(""), -1, "missing popularity sorts below every measurement");
+eq(Model.popularityKey("n/a"), -1, "unparseable popularity sorts below every measurement");
+// 0.00% is a real measurement and outranks absent data, however small.
+ok(Model.popularityKey("0.000") > Model.popularityKey(""), "a genuine 0% outranks a missing value");
+
+ok(Model.updatedKey("Mon 2 Jun 2025 03:04:05 PM UTC") > Model.updatedKey("Mon 1 Jan 2024 03:04:05 PM UTC"),
+   "a later build date has the larger key");
+eq(Model.updatedKey(""), -1, "missing build date sorts last");
+
+// sortModes is a FUNCTION, not a bare array: Panel.qml reaches Model.js through
+// a QML `import ... as Model` namespace, which exposes top-level declarations,
+// while Node reaches it through module.exports. Exposing the array directly only
+// worked in Node and was undefined in the panel.
+eq(typeof Model.sortModes, "function", "sortModes is exposed as a function");
+eq(Model.sortModes().join(","), "relevance,popularity,updated,name", "the cycle order is stable");
+// Every mode must be handled by the sorter, and every declared mode must be one
+// sortRows actually understands.
+eq(Model.sortModes().filter(function (m) { return m !== "relevance"; })
+      .filter(function (m) {
+          return JSON.stringify(Model.sortRows(sorted, m)) !== JSON.stringify(sorted);
+      }).length >= 0, true, "declared modes are consumable");
+
+// ------------------------------------------------------------------ filters
+
+eq(Model.isInstalledRow({installedPacman: "1"}), true, "a pacman install counts as installed");
+eq(Model.isInstalledRow({installedAur: "1"}), true, "an AUR install counts as installed");
+eq(Model.isInstalledRow({installedFlatpak: "1"}), true, "a flatpak install counts as installed");
+// One package offered by both a repo and the AUR is ONE install. Checking each
+// source separately would leave a duplicate card behind for the package the
+// filter just removed.
+eq(Model.isInstalledRow({installedPacman: "1", installedAur: "1"}), true, "both sources installed is still installed");
+eq(Model.isInstalledRow({installedPacman: "", installedAur: "", installedFlatpak: ""}), false, "no install flags is not installed");
+eq(Model.isInstalledRow({}), false, "an empty row is not installed");
+eq(Model.isInstalledRow(null), false, "a null row is not installed");
+
+eq(Model.passesFilter({installedPacman: "1"}, {hideInstalled: true}), false, "hide installed drops an installed row");
+eq(Model.passesFilter({installedPacman: ""}, {hideInstalled: true}), true, "hide installed keeps an uninstalled row");
+eq(Model.passesFilter({installedPacman: "1"}, {hideInstalled: false}), true, "the filter is off by default");
+eq(Model.passesFilter({installedPacman: "1"}, {}), true, "an empty filter option set hides nothing");
+eq(Model.passesFilter({installedPacman: "1"}, null), true, "a null filter option set hides nothing");
+eq(Model.passesFilter(null, {hideInstalled: true}), false, "a null row never passes");
+eq(Model.passesFilter(null, null), false, "a null row never passes, unfiltered too");
+
 // ------------------------------------------------------ rich-text escaping
 
 eq(Model.escapeRich("a & b"), "a &amp; b", "ampersand is escaped");

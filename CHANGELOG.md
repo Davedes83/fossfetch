@@ -11,6 +11,24 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Added
 
+- **Result sorting.** `Ctrl+S` (or the label above the results) cycles
+  Relevance → Popularity → Updated → Name. Relevance stays the default and is
+  deliberately *not* re-applied: the backends already append in relevance
+  order, and that ranking knows your query in a way no stored key can
+  reproduce — sorting by it would throw the only useful signal away. Name
+  sorting is case-folded, so capitals interleave with lowercase instead of
+  sorting as a separate block, and every mode falls back to name on a tie so
+  two rows can never trade places between runs.
+- **A "Hide installed" filter** (`Ctrl+H`). Searching for a browser when you
+  already run Firefox should not bury the alternatives under what you have.
+  It counts what it suppresses, so a search whose only matches are installed
+  says "Already installed — 12 matches — Ctrl+H to show them" rather than
+  borrowing the "No packages found" wording and implying the search failed.
+  Suppressed on the Updates tab, where every row is installed by definition
+  and the filter would empty the tab you opened precisely to see it.
+- **A keyboard hint footer** naming the keys the panel actually binds
+  (`↑↓ Move`, `↵ Install`, `F2 Details`, `Tab Source`, `Esc Close`).
+
 - **An Updates tab, shown only when there is something in it.** A background
   scan (`checkupdates`, `yay`/`paru -Qua`, `flatpak remote-ls --updates`) runs
   once at startup, every five minutes, and after any install, update or removal.
@@ -33,6 +51,31 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **Recent searches recorded every keystroke.** Live search runs on each
+  debounced prefix, and each one was filed as its own recent — typing
+  "vivaldi" left `via`, `vial`, `vival`, `vivald` and `vivaldi` behind as five
+  separate entries. Those are the innards of one search, not five searches. A
+  query is now remembered once the typing stops (1.2s), or immediately on an
+  explicit commit (Enter, Tab, close). A genuine pause longer than that still
+  records both halves, which is the honest reading. A clipboard suggestion is
+  armed but does not start the timer, so one you ignore never appears.
+- **Persisted settings were silently discarded.** `Model.sortModes` was read as
+  a bare array, but a `.js` imported with `import "Model.js" as Model` exposes
+  only top-level declarations to QML — `module.exports` is a Node-only
+  construct. The value was `undefined` in the panel while every Node test
+  passed, and the settings loader's empty `catch` swallowed the TypeError. The
+  result: the panel came up with defaults every time and any later save
+  overwrote the saved preferences. The loader now reports failures instead of
+  swallowing them, and a test asserts every `Model.x` the panel references is
+  declared at top level.
+- **Sorting blanked the cards.** `QQmlListModel.get()` returns objects bound to
+  the live rows, so clearing the model to reorder emptied them too —
+  re-appending gave cards with no name, no chips and no icon. Rows are now
+  snapshotted before the rebuild.
+- **The toolbar magnifier sat 2.5px above every other bar icon**, and its count
+  badge ran off the top of the screen. The badge was anchored above the button,
+  which already begins two pixels below the top of the display. Both are now
+  positioned inside the button's own bounds.
 - **The installed-package snapshot lost its versions.** It read names only
   (`pacman -Qq`), so there was nothing to compare an offered version against
   and no update could ever be detected honestly. It now reads `pacman -Q` and

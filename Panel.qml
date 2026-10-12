@@ -158,6 +158,59 @@ Panel {
   property bool showCoffeeButton: true
   property bool showOptions: false
 
+  // ------------------------------------------------------------ result view
+  // How the result list is ordered, and whether packages you already have are
+  // hidden. Both are persisted with the other options so a user who sorts by
+  // popularity gets that back after a shell restart rather than silently
+  // reverting to relevance.
+  //
+  // "relevance" is the default and is deliberately NOT re-applied by sorting:
+  // the backends append results in relevance order already, and that ranking
+  // knows the query in a way no stored key here can reproduce.
+  readonly property var sortModes: Model.sortModes()
+  property string sortMode: "relevance"
+  property bool hideInstalled: false
+
+  function sortLabel(m) {
+    if (m === "popularity") return "Popularity"
+    if (m === "updated") return "Updated"
+    if (m === "name") return "Name"
+    return "Relevance"
+  }
+
+  function sortLabelFor() { return root.sortLabel(root.sortMode) }
+
+  // Ctrl+S walks the cycle. Anything unrecognised (a hand-edited settings
+  // file, a mode from a newer version) is normalised back to relevance rather
+  // than left in a state the UI cannot label.
+  function normalizeSort(m) {
+    return root.sortModes.indexOf(String(m === undefined || m === null ? "" : m)) >= 0
+      ? String(m) : "relevance"
+  }
+
+  function cycleSort() {
+    var i = root.sortModes.indexOf(root.sortMode)
+    root.setSortMode(root.sortModes[(i + 1) % root.sortModes.length])
+  }
+
+  function setSortMode(m) {
+    var next = root.normalizeSort(m)
+    if (next === root.sortMode) return
+    root.sortMode = next
+    root.applyView()
+    root.persistOptions()
+  }
+
+  function setHideInstalled(v) {
+    if (root.hideInstalled === v) return
+    root.hideInstalled = v
+    // The rows already in the model have to be re-gated: this filter is applied
+    // when a row is added, so rows admitted under the old setting are still
+    // sitting there until the list is rebuilt.
+    root.applyView()
+    root.persistOptions()
+  }
+
   // AUR helpers actually present on this machine, detected once at panel open.
   // Previously the default was hard-coded to `yay`, so a paru-only user got an
   // install button that opened a terminal running a command that does not
@@ -261,6 +314,59 @@ Panel {
   property var recentSearches: []
   readonly property int recentLimit: 8
 
+  // A query is only remembered once the typing STOPS.
+  //
+  // Live search fires on every debounced keystroke, so recording a recent from
+  // there filed every intermediate prefix of a word as a separate entry —
+  // typing "vivaldi" filled the list with via, vial, vival, vivald and vivaldi.
+  // Those were never searches anyone ran; they are the innards of one search.
+  //
+  // So the pending query is held here and flushed after a settle window with
+  // no further typing, or immediately on an explicit commit (Enter, Tab, close).
+  // A genuine pause longer than the window still records both halves, which is
+  // the honest reading: those really were two separate searches.
+  property string recentPending: ""
+  readonly property int recentSettleMs: 1200
+
+  // Set while the field is filled programmatically, so a suggestion is not
+  // mistaken for typing. See applyClipboard().
+  property bool suppressRecentSettle: false
+
+  function noteSearch(q, armTimer) {
+    var term = String(q === undefined || q === null ? "" : q).trim().toLowerCase()
+    // Below the minimum length: drop it now rather than arming a timer that
+    // would go on to record it.
+    if (term.length < 3 || term.length > 60) {
+      root.recentPending = ""
+      recentSettle.stop()
+      return
+    }
+    root.recentPending = term
+    if (armTimer === false) {
+      // Still armed as a pending commit — so acting on the suggestion with
+      // Enter/Tab/close DOES remember it — but the settle timer stays stopped,
+      // so simply ignoring a clipboard suggestion never records it.
+      recentSettle.stop()
+      return
+    }
+    recentSettle.start()
+  }
+
+  function flushRecent() {
+    recentSettle.stop()
+    var term = root.recentPending
+    root.recentPending = ""
+    if (term === "") return
+    root.rememberSearch(term)
+  }
+
+  Timer {
+    id: recentSettle
+    interval: root.recentSettleMs
+    repeat: false
+    onTriggered: root.flushRecent()
+  }
+
   function rememberSearch(q) {
     var term = String(q || "").trim().toLowerCase()
     // One or two characters produce a flood of useless recents.
@@ -290,6 +396,8 @@ Panel {
       aurHelper: root.aurHelper,
       design: root.panelDesign,
       showCoffee: root.showCoffeeButton,
+      sortMode: root.sortMode,
+      hideInstalled: root.hideInstalled,
       recentSearches: root.recentSearches
     }, null, 2) + "\n"
     optionsWriter.command = ["python3", root.appstreamStateScript, "write-options", root.optionsFilePath]
@@ -314,6 +422,11 @@ Panel {
         if (typeof data.all === "boolean") root.allEnabled = data.all
         if (data.aurHelper === "yay" || data.aurHelper === "paru") root.aurHelper = data.aurHelper
         if (typeof data.showCoffee === "boolean") root.showCoffeeButton = data.showCoffee
+        // The settings file is user-writable, so the sort mode is validated
+        // against the known list rather than trusted: an unknown value would
+        // leave the cycle index at -1 and Ctrl+S would step from nowhere.
+        root.sortMode = root.normalizeSort(data.sortMode)
+        if (typeof data.hideInstalled === "boolean") root.hideInstalled = data.hideInstalled
         root.panelDesign = root.normalizeDesign(data.design)
         if (Array.isArray(data.recentSearches)) {
           // Defensive: the file is user-writable, so treat every entry as
@@ -330,7 +443,7 @@ Panel {
         }
         if (root.hostWidget && root.hostWidget.setToolbarDesign)
           root.hostWidget.setToolbarDesign(root.panelDesign)
-      } catch (e) { /* keep defaults */ }
+      } catch (e) { console.warn("[fossfetch] options load failed:", e) }
     }
   }
 
@@ -349,6 +462,8 @@ Panel {
   }
 
   function switchTab(t) {
+    // Tab is a commit: the user has decided what they searched for.
+    root.flushRecent()
     if (activeTab === t) return
     activeTab = t
     resultsList.currentIndex = -1
@@ -798,7 +913,107 @@ var upd = root.updateSpecFor(r)
     filteredModel.clear()
     root.pkgIndex = ({})
     root.flatpakIndex = ({})
+    root.hiddenInstalled = 0
     resultsList.currentIndex = -1
+  }
+
+  // How many results the hide-installed filter is currently suppressing. Counted
+  // rather than inferred so the empty state can say "12 already installed" — a
+  // bare "No packages found" when the search actually matched plenty would read
+  // as the search having failed.
+  property int hiddenInstalled: 0
+
+  // Identity of a row, independent of its position. Used to put the keyboard
+  // cursor back on the SAME package after a re-sort: without this, changing the
+  // sort would silently move the selection and Enter would then act on whatever
+  // happened to land at the old index.
+  function rowKey(r) {
+    if (!r) return ""
+    return String(r._pkg || "") + "|" + String(r.flatpakPkg || "")
+      + "|" + String(r.pacmanPkg || "") + "|" + String(r.name || "")
+  }
+
+  // Snapshot a model row into a PLAIN object.
+  //
+  // QQmlListModel.get() hands back an object tied to the live row. Clearing the
+  // model therefore empties every one of those objects, so re-appending them
+  // after a re-sort produced blank cards — no name, no chips, no icon. Copying
+  // the roles out first is what makes the rebuild survive.
+  //
+  // Enumerated rather than written out role by role, so a role added to addRow
+  // later is carried through automatically instead of being silently dropped
+  // here (which would reintroduce exactly the missing-role failure that
+  // addRow's defaults guard against).
+  function copyRow(r) {
+    var out = {}
+    for (var k in r) {
+      var v = r[k]
+      if (typeof v === "function") continue
+      out[k] = v
+    }
+    return out
+  }
+
+  // Hide-installed applies to search results only. Every row on the Updates tab
+  // IS installed by definition, so the filter there would empty the tab the user
+  // opened precisely to see what needed updating.
+  readonly property bool hideInstalledActive: root.hideInstalled && !root.isUpdates
+
+  // Reorder and re-gate the rows already in the model.
+  //
+  // Rebuilding the ListModel in place is the only way to reorder it: QQmlListModel
+  // has no move operation. That is safe here because every asynchronous
+  // write-back (metadata, icons, licences, AUR/Flathub details) re-resolves its
+  // row by key at apply time rather than holding onto a captured index, so
+  // reindexModel() below keeps those writes landing on the right package.
+  //
+  // Nothing is touched when the new order matches the old one — a rebuild
+  // destroys and recreates every delegate, and doing that on a no-op click would
+  // flicker the list and reset scroll position for no reason.
+  function applyView() {
+    if (filteredModel.count === 0) return
+    var rows = []
+    var before = []
+    var hidden = 0
+    for (var i = 0; i < filteredModel.count; i++) {
+      var r = filteredModel.get(i)
+      if (!Model.passesFilter(r, { hideInstalled: root.hideInstalledActive })) { hidden++; continue }
+      // Snapshot, not the live row object — see copyRow().
+      rows.push(root.copyRow(r))
+      before.push(root.rowKey(r))
+    }
+    // Counted even when nothing moved, so turning the filter back off has an
+    // accurate number to restore rather than a stale one.
+    root.hiddenInstalled = hidden
+    var after = Model.sortRows(rows, root.sortMode)
+    var moved = after.length !== before.length
+    if (!moved) {
+      for (var j = 0; j < after.length; j++) {
+        if (root.rowKey(after[j]) !== before[j]) { moved = true; break }
+      }
+    }
+    if (!moved) return
+
+    // Keep the highlighted package highlighted across the rebuild.
+    var prev = resultsList.currentIndex
+    var keepKey = ""
+    if (prev >= 0 && prev < filteredModel.count) keepKey = root.rowKey(filteredModel.get(prev))
+    // Must be read before the clear for the same reason as the rows above.
+
+    filteredModel.clear()
+    for (var k = 0; k < after.length; k++) filteredModel.append(after[k])
+    // Row positions changed, so every key -> index map has to be rebuilt or
+    // later metadata writes land on whichever package now sits at the old index.
+    root.reindexModel()
+
+    var at = -1
+    if (keepKey !== "") {
+      for (var m = 0; m < after.length; m++) {
+        if (root.rowKey(after[m]) === keepKey) { at = m; break }
+      }
+    }
+    resultsList.currentIndex = at >= 0 ? at : (after.length > 0 ? 0 : -1)
+    if (at >= 0) resultsList.positionViewAtIndex(at, ListView.Contain)
   }
 
   function rebuildResults() {
@@ -1009,6 +1224,11 @@ var upd = root.updateSpecFor(r)
     root.installedFlatpak = flats
     root.installedVersions = vers
     applyInstalledToRows()
+    // The installed snapshot is what "hide installed" filters on, and it often
+    // lands AFTER the search rows were appended — every row was admitted while
+    // it still looked uninstalled. Re-gate now that the answer is known, or the
+    // packages you asked to hide stay on screen for the rest of the session.
+    if (root.hideInstalledActive) root.applyView()
   }
 
   function applyInstalledToRows() {
@@ -1076,9 +1296,11 @@ var upd = root.updateSpecFor(r)
   property var pendingGroup: ({})
 
   function launchLiveSearch(q) {
-    // Recorded once the query is committed, not on every keystroke: the
-    // debounced timer below is what makes it a real search.
-    if (q.length >= 3) root.rememberSearch(q)
+    // NOT recorded here. This runs on every debounced keystroke, so recording
+    // from it filed each intermediate prefix as its own recent: typing
+    // "vivaldi" left five entries behind (via, vial, vival, vivald, vivaldi)
+    // for what the user considers one search. Recording waits for the typing to
+    // settle instead — see noteSearch()/flushRecent().
     var seq = ++searchSeq
     root.pendingGroup = ({})
     root.pacmanError = ""
@@ -1165,6 +1387,13 @@ var upd = root.updateSpecFor(r)
     row.installedPacman = root.isPacmanInstalled(row.pacmanPkg) ? "1" : ""
     row.installedAur = root.isAurInstalled(row.aurPkg) ? "1" : ""
     row.installedFlatpak = root.isFlatpakInstalled(row.flatpakPkg) ? "1" : ""
+    // Gate at the door rather than filtering the finished list. Results arrive
+    // one batch at a time, so a filter applied after the fact would show a
+    // package and then yank the card out from under the user mid-search.
+    if (!Model.passesFilter(row, { hideInstalled: root.hideInstalledActive })) {
+      root.hiddenInstalled++
+      return
+    }
     filteredModel.append(row)
     var at = filteredModel.count - 1
     // First writer wins, matching the previous linear-scan behaviour.
@@ -1283,6 +1512,9 @@ var upd = root.updateSpecFor(r)
     enqueueMeta()
     requestEnrich()
     refreshInstalled(false)
+    // Rows arrive in the backend's relevance order; re-sort for the active
+    // mode now that this source has finished landing.
+    root.applyView()
   }
 
   // Rank a result by how well its package name matches the query:
@@ -1341,6 +1573,7 @@ var upd = root.updateSpecFor(r)
     licenseDebounce.restart()
     requestEnrich()
     refreshInstalled(false)
+    root.applyView()
   }
 
   // True if a live row with this flatpak app id is already in the model.
@@ -1414,6 +1647,7 @@ var upd = root.updateSpecFor(r)
     // the batched local/appstream/flathub lookups resolve one by name).
     requestEnrich()
     refreshInstalled(false)
+    root.applyView()
   }
 
   Process {
@@ -2134,6 +2368,9 @@ var upd = root.updateSpecFor(r)
   }
 
   function close() {
+    // The panel can be dismissed faster than the settle window, and a search
+    // that was run and then closed on is still a search worth remembering.
+    root.flushRecent()
     root.controller.hide()
   }
 
@@ -2167,7 +2404,13 @@ var upd = root.updateSpecFor(r)
     var t = String(text || "").trim()
     if (t === "" || t.indexOf("\n") !== -1 || t.length > 80) return
     if (searchField.text !== "") return
+    // Filling the field is not typing. Arm the pending query so committing it
+    // still remembers it, but do not start the settle timer: the clipboard is
+    // offered speculatively, and a suggestion the user ignored should never
+    // turn up in their recents.
+    root.suppressRecentSettle = true
     searchField.text = t
+    root.suppressRecentSettle = false
     root.refocus()
   }
 
@@ -2337,6 +2580,9 @@ var upd = root.updateSpecFor(r)
   // button's "Confirm?" state); a second press runs the command. An
   // already-installed row arms the removal instead.
   function activateCursor() {
+    // Enter is the other explicit commit: the user acted on this query, so it
+    // is a real search regardless of whether the settle window has elapsed.
+    root.flushRecent()
     if (filteredModel.count === 0) return
     var idx = resultsList.currentIndex
     if (idx < 0 || idx >= filteredModel.count) return
@@ -2853,11 +3099,80 @@ Icon {
                   // here because the search field owns focus and would type it.
                   root.openDetailsCursor()
                   event.accepted = true
+                } else if (event.key === Qt.Key_S && (event.modifiers & Qt.ControlModifier)) {
+                  // Cycle the result sort. Ctrl rather than a bare key because
+                  // the field owns focus: an unmodified S is a letter to type.
+                  // Shown in the sort row's own label, which is where the
+                  // control and its hint sit together.
+                  if (root.isLive) root.cycleSort()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_H && (event.modifiers & Qt.ControlModifier)) {
+                  // Hide / show packages already installed.
+                  if (root.isLive) root.setHideInstalled(!root.hideInstalled)
+                  event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                   root.activateCursor()
                   event.accepted = true
                 }
               }
+            }
+          }
+        }
+
+        // ------------------------------------------------------- sort & filter row
+        // Only shown once there is something to sort. It sits directly above the
+        // results so the control and the thing it controls are adjacent, and it
+        // names its own shortcut in the label rather than adding two more items
+        // to the hint footer (which is already at the limit of this panel's
+        // width).
+        //
+        // Both controls are live only on the search tabs. The Updates tab is a
+        // scan result set, not a search result set: its order comes from the
+        // scan and "hide installed" would empty it entirely.
+        Item {
+          id: sortBar
+          width: parent.width
+          implicitHeight: Style.space(24)
+          visible: resultsList.count > 0 && root.isLive
+
+          Text {
+            id: sortLabel
+            anchors.left: parent.left
+            anchors.right: sortPills.left
+            anchors.rightMargin: Style.spacing.sm
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Sort: " + root.sortLabelFor() + "  (Ctrl+S)"
+            color: sortLabelMouse.containsMouse ? Color.accent : Util.alpha(Color.popups.text, 0.6)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+            Behavior on color { ColorAnimation { duration: 120 } }
+
+            MouseArea {
+              id: sortLabelMouse
+              anchors.fill: parent
+              anchors.leftMargin: -Style.space(6)
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.cycleSort()
+            }
+          }
+
+          Row {
+            id: sortPills
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.sm
+
+            HelperPill {
+              label: "Ctrl+S"
+              onClicked: root.cycleSort()
+            }
+            HelperPill {
+              label: root.hideInstalled ? "Show installed" : "Hide installed"
+              selected: root.hideInstalled
+              onClicked: root.setHideInstalled(!root.hideInstalled)
             }
           }
         }
@@ -3369,13 +3684,18 @@ Icon {
               spacing: Style.spacing.md
 
               Text {
+                // A search that matched only installed packages is not a failed
+                // search, so it must not borrow the "No packages found" wording
+                // — that tells the user to retype something that worked fine.
                 text: root.query === ""
                     ? "Search " + (root.isAll ? "pacman, Flathub and the AUR"
                       : root.isPacman ? "an Arch package"
                       : root.isFlatpak ? "a Flatpak app" : "an AUR package")
                     : root.tabError() !== ""
                       ? "Lookup failed"
-                      : "No " + (root.isPacman || root.isAur ? "packages" : "apps") + " found"
+                      : root.hiddenInstalled > 0
+                        ? "Already installed"
+                        : "No " + (root.isPacman || root.isAur ? "packages" : "apps") + " found"
                 color: Color.popups.text
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
@@ -3391,7 +3711,11 @@ Icon {
                       ? "e.g. gimp, chromecast, vscode, obs, libreoffice"
                       : root.tabError() !== ""
                         ? root.tabError()
-                        : "Try a different name"
+                        : root.hiddenInstalled > 0
+                          ? root.hiddenInstalled + (root.hiddenInstalled === 1
+                              ? " match is already installed — Ctrl+H to show it"
+                              : " matches are already installed — Ctrl+H to show them")
+                          : "Try a different name"
                 color: root.tabError() !== "" ? Color.urgent : Util.alpha(Color.popups.text, 0.5)
                 horizontalAlignment: Text.AlignHCenter
                 width: Math.min(implicitWidth, parent.width)
@@ -3573,6 +3897,8 @@ Icon {
   function scheduleFilter() {
     pendingQuery = searchField.text
     searchDebounce.start()
+    // Restarted on every keystroke, so it only elapses once the user stops.
+    root.noteSearch(pendingQuery, !root.suppressRecentSettle)
   }
 
   //                                                         small install button

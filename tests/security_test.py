@@ -827,6 +827,260 @@ class FossFetchTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          "Model.js unit tests failed:\n%s" % (proc.stdout + proc.stderr))
 
+    def test_bar_icon_uses_the_shell_optical_geometry(self):
+        """The magnifier must render on the same geometry as every other bar icon.
+
+        Measured off a real bar capture: as a plain Text at font.caption + 1 the
+        glyph's painted centre sat at y=12.0 while its neighbours averaged
+        y=13.88 — 1.9px too high, and 2px smaller. Qt centres a Text's LINE BOX,
+        and this font's ascent/descent are asymmetric, so the painted shape floats
+        above the box centre. Every other bar icon has the identical drift; they
+        simply share one font size and one canvas (BarIconButton centres
+        OpticalGlyph in a Style.bar.iconCanvas box), so it cancels out visually.
+
+        So the fix is to render through the shell's own OpticalGlyph at
+        Style.bar.iconFont inside a Style.bar.iconCanvas box — alignment by
+        construction, not by an offset nudge that the next font change undoes.
+        """
+        with open(os.path.join(PLUGIN, "BarWidget.qml"), encoding="utf-8") as fh:
+            src = fh.read()
+
+        self.assertIn("import qs.Ui", src, "BarWidget must import the shell UI types")
+        self.assertIn("OpticalGlyph {", src, "the magnifier must render via OpticalGlyph")
+        self.assertIn("fontSize: Style.font.body", src,
+                      "the magnifier must use the same font size as BarIconButton")
+        # Negative assertions run over CODE, not raw text: these token names are
+        # also named in the comments explaining WHY they are right, so matching
+        # the whole file would fail on its own documentation.
+        code = "\n".join(ln.split("//")[0] for ln in src.splitlines())
+        self.assertNotIn("Style.bar.iconFont", code,
+                         "BarIconButton inherits WidgetButton's `body` size; "
+                         "iconFont is a different token and shifts the glyph")
+        self.assertNotIn("height: 26", code,
+                         "the button must track the bar's slot size, not a literal")
+        self.assertIn("height: root.barSize", code)
+
+        # The bar host sizes each slot from the widget root's implicitHeight
+        # (Bar.qml), so the root must forward the button's size. It already did;
+        # this pins it, because dropping it silently collapses the slot to zero
+        # and re-raises the glyph.
+        self.assertIn("implicitHeight: button.height", code)
+        self.assertIn("Layout.preferredWidth: Style.bar.iconCanvas", src)
+        self.assertIn("Layout.preferredHeight: Style.bar.iconCanvas", src)
+
+        # The regression itself: a bare Text at a caption-derived pixel size is
+        # what produced the vertical offset, so it must not come back.
+        glyph = src[src.index("OpticalGlyph {"):]
+        glyph = glyph[:glyph.index("}")]
+        self.assertNotIn("anchors.centerIn: parent", glyph,
+                         "centring a Text line box is what skewed the glyph")
+        self.assertNotIn("font.caption + 1", glyph)
+        self.assertIn("anchors.fill: parent", glyph,
+                      "fill the icon canvas exactly as BarIconButton does")
+        # The family stays explicitly bound — an unset family silently falls
+        # back to whatever the process resolved, which reads as a foreign font.
+        self.assertIn("fontFamily: Style.font.resolvedFamily", glyph)
+
+    def test_recents_record_the_search_not_every_typed_prefix(self):
+        """Typing a word must file ONE recent, not one per debounced keystroke.
+
+        Live search fires on every debounced prefix, so recording a recent from
+        that path meant typing "vivaldi" left via, vial, vival, vivald and
+        vivaldi behind as five separate entries — the innards of one search,
+        presented to the user as five searches. Those prefixes are never
+        something anyone runs.
+
+        The recording therefore waits for the typing to settle, or for an
+        explicit commit (Enter, Tab, close) which flushes immediately.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+
+        # The old call site must be gone from the live-search path.
+        launch = src[src.index("function launchLiveSearch(q)"):]
+        launch = launch[:launch.index("\n  }")]
+        self.assertNotIn("rememberSearch(", launch,
+                         "live search must not record a recent per keystroke")
+
+        # Settle window, armed from the debounced query path.
+        self.assertIn("root.noteSearch(pendingQuery,", src)
+        self.assertIn("readonly property int recentSettleMs: 1200", src)
+
+        # Every explicit commit flushes rather than waiting out the window.
+        for fn in ("function close()", "function switchTab(t)",
+                   "function activateCursor()"):
+            body = src[src.index(fn):]
+            self.assertIn("root.flushRecent()", body[:body.index("\n  }")],
+                          "%s must flush the pending search" % fn)
+
+        # A query too short to be worth keeping must not be armed at all.
+        note = src[src.index("function noteSearch(q"):]
+        note = note[:note.index("\n  }")]
+        self.assertIn("term.length < 3", note)
+        self.assertIn("recentSettle.stop()", note)
+
+        # The clipboard is offered speculatively. Filling the field is not
+        # typing, so it must arm the pending commit (acting on it still
+        # remembers it) WITHOUT starting the settle timer (ignoring it must
+        # not). A suggestion in the recents is the same bug as "vial" being in
+        # the recents.
+        self.assertIn("root.suppressRecentSettle = true", src)
+        self.assertIn("root.noteSearch(pendingQuery, !root.suppressRecentSettle)", src)
+        self.assertIn("if (armTimer === false)", note)
+
+    def test_reordering_reindexes_the_row_lookup_maps(self):
+        """A sort must rebuild pkgIndex/flatpakIndex after reordering.
+
+        QQmlListModel has no move operation, so sorting is implemented by
+        reading the rows out, re-appending them and clearing the model. Every
+        asynchronous write-back (metadata, icons, licences, AUR/Flathub
+        details) re-resolves its row through those key -> index maps at apply
+        time rather than holding a captured index — which is exactly why a
+        re-sort that skips reindexModel() would let a late `pacman -Si` result
+        write an icon or a licence onto whichever unrelated package happened to
+        have moved into that slot.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        start = src.index("function applyView()")
+        end = src.index("\n  }", start)
+        body = src[start:end]
+        self.assertIn("root.reindexModel()", body)
+        # And it has to come after the model is repopulated, or it indexes the
+        # freshly cleared model instead of the new order.
+        self.assertLess(body.index("filteredModel.append"),
+                        body.index("root.reindexModel()"),
+                        "reindexModel must run after the rows are re-appended")
+
+        # The rows must be SNAPSHOTS. QQmlListModel.get() returns objects bound
+        # to the live rows, so `clear()` empties them: re-appending the objects
+        # themselves after a sort produced blank cards — name, chips and icon
+        # all gone, with no error anywhere. Copying first is the whole fix.
+        self.assertIn("root.copyRow(r)", body,
+                      "applyView must snapshot rows, not re-append live "
+                      "model objects that clear() will empty")
+        self.assertLess(body.index("root.copyRow(r)"),
+                        body.index("filteredModel.clear()"),
+                        "rows must be copied BEFORE the model is cleared")
+        self.assertIn("function copyRow(r)", src,
+                      "copyRow is the snapshot helper applyView depends on")
+
+    def test_hide_installed_never_empties_the_updates_tab(self):
+        """Every Updates row is installed by definition.
+
+        So "hide installed" has to be suppressed on that tab, or the tab the
+        user opened to see what needs updating goes blank the moment they filter
+        anything. The gate is one property, and the filter and the sort bar both
+        read it rather than re-deriving the condition themselves."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("readonly property bool hideInstalledActive: "
+                      "root.hideInstalled && !root.isUpdates", src)
+        # addRow's gate is the only place rows are admitted, and it must go
+        # through the guarded property, not the raw flag.
+        start = src.index("function addRow(obj)")
+        body = src[start:src.index("\n  }", start)]
+        self.assertIn("Model.passesFilter(row, "
+                      "{ hideInstalled: root.hideInstalledActive })", body)
+
+    def test_sort_prefers_relevance_and_validates_the_stored_mode(self):
+        """Relevance must never be re-derived, and the persisted mode must be
+        validated.
+
+        Sorting by relevance would discard the backends' ranking — the only
+        ordering that knows the query — replacing it with a name sort. And the
+        settings file is user-writable: an unrecognised mode would leave the
+        cycle index at -1, so Ctrl+S would step from nowhere."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("property string sortMode: \"relevance\"", src)
+        self.assertIn("root.sortMode = root.normalizeSort(data.sortMode)", src)
+        self.assertIn("function normalizeSort(m)", src)
+        # normalizeSort must fall back rather than trust the file.
+        norm = src[src.index("function normalizeSort(m)"):]
+        norm = norm[:norm.index("\n  }")]
+        self.assertIn("\"relevance\"", norm)
+        # The view model is pure logic in Model.js, unit-tested separately; the
+        # panel must delegate rather than reimplement a comparator inline.
+        # (The pre-existing inline sorts are the relevance rankers and the
+        # update-scan row order, which are deliberate and unrelated.)
+        self.assertIn("Model.sortRows(rows, root.sortMode)", src)
+
+    def test_sort_and_filter_have_keyboard_reachability(self):
+        """The search field owns focus, so the controls need real shortcuts.
+
+        A mouse-only sort would be unreachable for a keyboard-first panel — the
+        same reason F2 exists. Both are guarded on isLive so they cannot fire on
+        the Updates tab, whose result set is not a search result set."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("Qt.Key_S && (event.modifiers & Qt.ControlModifier)", src)
+        self.assertIn("Qt.Key_H && (event.modifiers & Qt.ControlModifier)", src)
+        self.assertIn("if (root.isLive) root.cycleSort()", src)
+        self.assertIn("if (root.isLive) root.setHideInstalled(!root.hideInstalled)", src)
+        # Discovered, not merely present: the shortcut is named in the control's
+        # own label and the footer hint stays within the panel width.
+        self.assertIn("\"Sort: \" + root.sortLabelFor() + \"  (Ctrl+S)\"", src)
+
+    def test_every_model_reference_exists_in_both_js_and_qml(self):
+        """Each `Model.x` the panel uses must resolve in Node AND in QML.
+
+        A `.js` file imported with `import "Model.js" as Model` exposes its
+        top-level functions and vars as the namespace. `module.exports` exists
+        ONLY for the Node test harness. So a helper that is exported for tests
+        but declared in a way QML cannot see is `undefined` at runtime while
+        every Node test still passes.
+
+        That is not hypothetical: reading `Model.sortModes` instead of calling
+        `Model.sortModes()` left it undefined inside Panel.qml's settings
+        loader. The loader wraps its body in a try/catch, so the TypeError was
+        swallowed and the panel silently ran with DEFAULT preferences — losing
+        recents, sort mode and every other setting, with no error anywhere.
+        Node's test suite was green the whole time because Node resolved it
+        through module.exports.
+
+        So this asserts against Model.js's own top-level declarations rather
+        than against its exports block: anything Panel.qml names must be a
+        top-level `function name(` or `var name`.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            panel = fh.read()
+        with open(os.path.join(PLUGIN, "Model.js"), encoding="utf-8") as fh:
+            model = fh.read()
+
+        # Comments are stripped first: both the import statement and the
+        # comment above it are the literal text `Model.js`, which the reference
+        # pattern happily reads as a member access on a symbol called "js".
+        # Nothing in a comment can call anything.
+        code_only = "\n".join(ln.split("//")[0] for ln in panel.splitlines())
+        code_only = re.sub(r'import\s+"Model\.js"\s+as\s+Model', "", code_only)
+        used = set(re.findall(r"\bModel\.([A-Za-z_]\w*)", code_only))
+        self.assertTrue(used, "expected Panel.qml to use the Model namespace")
+
+        declared = set(re.findall(r"^function\s+([A-Za-z_]\w*)\s*\(", model, re.M))
+        declared |= set(re.findall(r"^var\s+([A-Za-z_]\w*)\s*=", model, re.M))
+        declared |= set(re.findall(r"^\s*function\s+([A-Za-z_]\w*)\s*\(", model, re.M))
+
+        missing = sorted(used - declared)
+        self.assertEqual(missing, [],
+                         "Panel.qml references Model.%s which Model.js does not "
+                         "declare at top level -- undefined in QML even if it "
+                         "is present in module.exports" % ", ".join(missing))
+
+    def test_settings_load_failures_are_not_silent(self):
+        """The options loader must not swallow errors with an empty catch.
+
+        One bad line in that try block silently disables EVERY persisted
+        preference at once — the panel just comes up with defaults and no
+        complaint anywhere. The catch keeps the defaults (that part is right,
+        since the file is user-writable) but it has to say so."""
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        loader = src[src.index("id: optionsFile"):]
+        loader = loader[:loader.index("function visibleTabs()")]
+        self.assertNotIn("catch (e) { /* keep defaults */ }", loader)
+        self.assertIn("catch (e) { console.warn(", loader)
+
     def test_alternatives_removed_and_all_is_opt_in(self):
         """Alternatives was dropped; the merged All tab must stay opt-in.
 

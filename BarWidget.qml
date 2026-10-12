@@ -199,8 +199,10 @@ BarWidget {
   Item {
     id: button
     // Icon-only style is a compact square pill holding just the magnifier.
+    // Height tracks the bar's own slot size rather than a baked-in 26, so the
+    // button fills its slot exactly like every shell bar widget does.
     width: root.bareIcon ? 26 : rootLabel.implicitWidth + 22
-    height: 26
+    height: root.barSize
     anchors.verticalCenter: parent.verticalCenter
 
     // Let the bar's tooltip system treat this pill as a hoverable target.
@@ -240,16 +242,23 @@ BarWidget {
       // than as a third item in rootLabel: adding it to the RowLayout would
       // resize the button every time the count changed, so the bar would visibly
       // twitch as updates were applied. Overlaying keeps the layout fixed.
+      //
+      // Anchored INSIDE the button, not overhanging it. This used to sit at
+      // topMargin: -4, which pushed it four pixels above a button that already
+      // starts two pixels below the top of the screen — the badge was clipped by
+      // the screen edge and the count was cut in half. The button is the one
+      // thing guaranteed to be on-screen, so the badge is positioned relative to
+      // it with a positive margin and cannot escape the bar.
       Rectangle {
         id: updateBadgeRect
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.rightMargin: -3
-        anchors.topMargin: -4
+        anchors.rightMargin: -1
+        anchors.topMargin: 0
         visible: root.updateBadge !== ""
-        width: badgeText.implicitWidth + 9
-        height: 14
-        radius: 7
+        width: badgeText.implicitWidth + 8
+        height: 12
+        radius: 6
         color: root.accentColor
         border.width: 1
         border.color: root.surfaceAlt
@@ -274,22 +283,33 @@ BarWidget {
         // Icon chip: accent-tinted squircle holding the search-plus glyph so
         // the button reads as an app/launcher tile rather than plain text.
         Rectangle {
-          Layout.preferredWidth: 16
-          Layout.preferredHeight: 16
+          Layout.preferredWidth: Style.bar.iconCanvas
+          Layout.preferredHeight: Style.bar.iconCanvas
           radius: root.chipRadius()
           color: root.chipFill()
           Behavior on color { ColorAnimation { duration: 150 } }
 
-          // font.family is bound explicitly. It was previously unset, so this
-          // one glyph fell back to whatever family the process happened to
-          // resolve — which is why the toolbar icon looked like it came from a
-          // different app than everything around it.
-          Text {
-            anchors.centerIn: parent
+          // Rendered through the shell's own OpticalGlyph, on the same
+          // iconCanvas / iconFont geometry as every other bar icon
+          // (BarIconButton centres OpticalGlyph in opticalCanvas). This glyph
+          // used to be a plain Text at font.caption + 1, which measured 1.9px
+          // HIGHER than its neighbours and 2px smaller: Qt centres a Text's
+          // LINE BOX, and this font's ascent/descent are asymmetric, so the
+          // painted shape sat above the box centre. Every other bar icon has
+          // the same drift — they just share one font size and one canvas, so
+          // it cancels out. Matching that geometry fixes it by construction
+          // instead of by nudging an offset that a future font change would
+          // undo.
+          OpticalGlyph {
+            anchors.fill: parent
             text: root.searchIcon
             color: root.hot ? root.accentColor : root.foregroundColor
-            font.family: Style.font.resolvedFamily
-            font.pixelSize: Style.font.caption + 1
+            fontFamily: Style.font.resolvedFamily
+            // Style.font.body, NOT Style.bar.iconFont: BarIconButton never
+            // overrides WidgetButton's fontSize, so every shell bar icon
+            // renders at `body` (12). Using iconFont (13) put this glyph on a
+            // different line box from its neighbours.
+            fontSize: Style.font.body
             Behavior on color { ColorAnimation { duration: 150 } }
           }
         }

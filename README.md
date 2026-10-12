@@ -105,6 +105,26 @@ package you named is removed, never its dependencies, because those are
 usually still needed by something else. Both actions open a confirmation dialog
 naming the exact package.
 
+### Sorting and filtering
+The row above the results sorts them. **Ctrl+S** cycles four modes:
+
+| Mode | Order |
+| --- | --- |
+| **Relevance** (default) | The backend's own ranking — exact name hit, then prefix, substring, fuzzy, with AppStream categories boosted |
+| **Popularity** | AUR Popularity (the share of AUR users running the package) first |
+| **Updated** | Newest build first; a row with no date sorts last |
+| **Name** | A → Z, case-insensitive |
+
+Relevance is the default precisely because sorting cannot reproduce it: only
+the backends know your query. The other three reorder what they found.
+
+**Ctrl+H** (or the **Hide installed** pill) drops packages you already have. A
+search whose matches are all installed says so, and tells you how many, rather
+than reporting nothing found. It stays off on the Updates tab, where every row
+is installed by definition.
+
+Both preferences persist with the rest of the options.
+
 ### Details sheet
 Each card has a **Details** button — or **F2** on the highlighted row —
 showing the dependency graph, installed and download size, provides/conflicts,
@@ -130,12 +150,16 @@ All options persist to
 
 ### Built for the Omarchy shell
 - **Recent searches**: the last 8 queries are kept in the options file and
-  offered as chips whenever the box is empty. Cleared from the same row.
+  offered as chips whenever the box is empty. Cleared from the same row. A
+  query is remembered once you stop typing, not on every debounced keystroke —
+  typing "vivaldi" is one search, not five.
 - **Match highlighting**: the matched run in a card title is accented.
 - **Keyboard-first**: `Tab` / `Shift+Tab` cycles tabs, `↑`/`↓` move the
   selection, `Enter` arms the highlighted card's install (a second press runs
-  it), `Esc` closes, `/` refocuses the search box. `←`/`→` are left alone so
-  they edit the query like a normal text field.
+  it), `F2` opens Details, `Ctrl+S` cycles the sort, `Ctrl+H` toggles Hide
+  installed, `Esc` closes, `/` refocuses the search box. `←`/`→` are left alone
+  so they edit the query like a normal text field. The bindings are listed in a
+  footer under the results rather than left to be discovered in the source.
 - **Theme-aware**: per-ecosystem accents (green = Pacman, cyan = AUR,
   blue = Flatpak, yellow = confirm state) are read from the active theme's
   `colors.toml`, so the panel blends with whatever theme is running.
