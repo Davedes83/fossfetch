@@ -176,7 +176,9 @@ All options persist to
   marks rather than the cursor. One command runs per source — all the pacman
   packages in a single `pacman -S`, the AUR ones together, Flatpak separately —
   so a batch cannot deadlock on the pacman lock or open a window per package.
-  Removal stays non-cascading and still confirms first.
+  Removal stays non-cascading and still confirms first. Commands run in
+  **your** default terminal (via `xdg-terminal-exec`, following
+  `omarchy default terminal`), not a hard-coded one.
 - **Theme-aware**: per-ecosystem accents (green = Pacman, cyan = AUR,
   blue = Flatpak, yellow = confirm state) are read from the active theme's
   `colors.toml`, so the panel blends with whatever theme is running.

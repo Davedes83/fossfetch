@@ -78,7 +78,26 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
-- **The search box sometimes needed two opens before it took a character.**
+- **Batch actions never launched anything.** The batch runner reached the
+  process through `root.actionProc`, which resolves to `undefined` in this
+  scope and throws — while the identical single-action code, using the bare id,
+  works. The throw happened after `batchActive` had already been set, so the
+  bar read "Working…" indefinitely over a command that was never dispatched.
+- **The terminal was hard-coded to kitty.** `TERMINAL` is unset in the Omarchy
+  shell's environment, so the `if (!term) term = "kitty"` fallback worked for
+  the author and produced a terminal that could not start for anyone else. The
+  runner now resolves the user's own terminal: `xdg-terminal-exec` first
+  (which reads `~/.config/xdg-terminals.list`, where `omarchy default terminal`
+  records the choice), then `omarchy-default-terminal`, then `TERMINAL` /
+  `TERMINAL_CMD`, with kitty kept only as a last resort. The single-row install,
+  update and remove paths use the same resolution.
+- **A failed batch reported itself as finished.** The outcome is now the
+  command's own exit status: pacman refuses an entire command when any target
+  is unknown, and the terminal is gone in under a second, so an unconditional
+  "Batch finished" is how a batch that installed nothing gets announced as a
+  success. A non-zero status says so and points at re-running it.
+
+
   `controller.show()` flips the panel's `opened` flag, and a panel that is not
   yet visible has no focusable window — so the immediate `forceActiveFocus()`
   after it was silently dropped, the panel appeared, and every keystroke went to

@@ -352,6 +352,10 @@ Panel {
   // that batch dead: the exit would find nothing left and report the whole
   // thing finished before it had finished.
   property bool batchActive: false
+  // Exit status of the most recent command. Quickshell's Process exposes it
+  // via the exited() signal; captured because onExited arrives after the
+  // queue has already been drained.
+  property int lastBatchExitCode: 0
   readonly property bool batchRunning: root.batchActive
 
   // Armed but not yet running: the confirmation (or the arm-then-run second
@@ -360,6 +364,12 @@ Panel {
 readonly property bool batchArmed: root.pendingAction !== null && root.batchQueue.length > 0
 
   // Runs the next queued group, or reports the whole batch finished.
+  // BARE ids, deliberately: `root.actionProc` and `root.confirmResetTimer`
+  // resolve to undefined in this scope and throw, while the identical
+  // single-action code below writes the bare id and works. The failure is
+  // silent from the user's side -- batchActive has already been set by the
+  // time the throw happens, so the bar reads "Working…" forever over a
+  // process that was never launched.
   function runNextBatchGroup() {
     if (root.batchQueue.length === 0) {
       root.batchActive = false
@@ -367,7 +377,16 @@ readonly property bool batchArmed: root.pendingAction !== null && root.batchQueu
       root.refreshInstalled(true)
       root.updatesAt = 0
       root.refreshUpdates()
-      root.notify("FossFetch", "Batch finished. See the terminals for the results.")
+      // The outcome is whatever the last command returned, not "done". A batch
+      // containing one package that no longer exists makes pacman refuse the
+      // WHOLE command before doing anything, and the terminal is gone in under
+      // a second -- so an unconditional "Batch finished" is how a batch that
+      // installed nothing ends up reported as a success.
+      if (root.lastBatchExitCode !== 0)
+        root.notify("FossFetch", "Batch failed (exit " + root.lastBatchExitCode
+          + "). Nothing was installed -- re-run it to see why.")
+      else
+        root.notify("FossFetch", "Batch finished. See the terminals for the results.")
       return
     }
     var g = root.batchQueue[0]
@@ -380,12 +399,9 @@ readonly property bool batchArmed: root.pendingAction !== null && root.batchQueu
       ? g.names[0] : (g.names.length + " packages")
     root.lastActionKind = g.kind
     root.lastActionVerb = g.mode
-    var term = Quickshell.env("TERMINAL")
-    if (!term) term = Quickshell.env("TERMINAL_CMD")
-    if (!term) term = "kitty"
-    root.actionProc.command = [term, "-e"].concat(root.batchCommand(g))
-    root.actionProc.running = true
-    root.installFinishedTimer.restart()
+    actionProc.command = root.terminalArgv(root.batchCommand(g))
+    actionProc.running = true
+    installFinishedTimer.restart()
   }
 
   // The literal argument list for one group. Kept separate from the launch so
@@ -454,7 +470,7 @@ function batchPkgCount(mode) {
     root.pendingAction = { mode: mode, kind: groups[0].kind,
                            pkg: total + " packages", name: total + " packages" }
     root.batchQueue = groups
-    root.confirmResetTimer.restart()
+    confirmResetTimer.restart()
   }
 
   // Rebuild the key set after a sort/filter/rebuild. Rows that are no longer on
@@ -2644,11 +2660,7 @@ var upd = root.updateSpecFor(r)
     root.lastActionKind = kind
     root.lastActionVerb = "install"
 
-    // Resolve the user's terminal (falls back to kitty, matching the shell).
-    var term = Quickshell.env("TERMINAL")
-    if (!term) term = Quickshell.env("TERMINAL_CMD")
-    if (!term) term = "kitty"
-    actionProc.command = [term, "-e"].concat(args)
+    actionProc.command = root.terminalArgv(args)
     actionProc.running = true
     // The package will be installed by the time the user comes back to this
     // panel; re-read the snapshot so the row shows as Installed, not stale.
@@ -2669,10 +2681,7 @@ var upd = root.updateSpecFor(r)
     root.lastActionKind = kind
     root.lastActionVerb = "update"
 
-    var term = Quickshell.env("TERMINAL")
-    if (!term) term = Quickshell.env("TERMINAL_CMD")
-    if (!term) term = "kitty"
-    actionProc.command = [term, "-e"].concat(args)
+    actionProc.command = root.terminalArgv(args)
     actionProc.running = true
     // Updates resolve and download; give the terminal room before re-reading
     // the installed snapshot (matches the remove settle time).
@@ -2701,10 +2710,7 @@ var upd = root.updateSpecFor(r)
     root.lastActionKind = kind
     root.lastActionVerb = "remove"
 
-    var term = Quickshell.env("TERMINAL")
-    if (!term) term = Quickshell.env("TERMINAL_CMD")
-    if (!term) term = "kitty"
-    actionProc.command = [term, "-e"].concat(args)
+    actionProc.command = root.terminalArgv(args)
     actionProc.running = true
     removeFinishedTimer.restart()
   }
@@ -2733,7 +2739,10 @@ var upd = root.updateSpecFor(r)
     // proxy for "the action finished". The exit code itself belongs to the
     // terminal, not pacman, so the toast states the outcome neutrally and points
     // at the terminal rather than claiming success.
-    onExited: {
+    onExited: function(exitCode) {
+      // The terminal propagates its child's status, so this is pacman/flatpak's
+      // own exit code and not kitty's.
+      root.lastBatchExitCode = exitCode === undefined || exitCode === null ? 0 : exitCode
       // A batch runs its groups one after another through this same Process, so
       // its exit is the cue for the next group rather than the end of the
       // whole thing. Handled before the single-action toast, which would
@@ -2770,6 +2779,7 @@ var upd = root.updateSpecFor(r)
   function open() {
     root.controller.show()
     root.ensureFreshScan()
+    root.detectTerminal()
     root.focusWhenShown()
   }
 
@@ -3078,6 +3088,65 @@ var upd = root.updateSpecFor(r)
     if (idx < 0) idx = 0
     var next = tabs[(idx + (direction > 0 ? 1 : tabs.length - 1)) % tabs.length]
     root.switchTab(next)
+  }
+
+  // ------------------------------------------------------------- the terminal
+
+// The user's own terminal, never a hard-coded one.
+//
+// The fallback used to be "kitty", which silently worked for the author and
+// did nothing for everyone else: `TERMINAL` is unset in the Omarchy shell's
+// environment, so every user who is not a kitty user got a terminal that could
+// not start -- a window that flashed and vanished, or no window at all.
+//
+// Order of preference:
+//   1. xdg-terminal-exec. It reads ~/.config/xdg-terminals.list, which is
+//      exactly where `omarchy default terminal <x>` writes the user's choice,
+//      so this follows their setting with no Omarchy-specific coupling.
+//   2. `omarchy-default-terminal`, the script that reads that same list.
+//   3. TERMINAL / TERMINAL_CMD from the environment.
+//   4. kitty, purely as a last resort.
+property string terminalRunner: ""   // "" | "xdg" | "<name>"
+
+  function detectTerminal() {
+    // Re-running is harmless and cheap; a user who changes their default
+    // terminal gets it picked up on the next open.
+    if (terminalProc.running) return
+    terminalProc.running = true
+  }
+
+  function applyTerminalProbe(text) {
+    var t = String(text || "").trim()
+    if (t === "xdg") { root.terminalRunner = "xdg"; return }
+    // The script can echo several lines; the first non-empty one is the name.
+    var lines = t.split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var name = lines[i].trim()
+      if (name !== "" && name !== "xdg") { root.terminalRunner = name; return }
+    }
+    // Nothing resolved. terminalArgv() falls back to kitty, which at worst
+    // reproduces the old behaviour instead of silently doing nothing.
+    root.terminalRunner = ""
+  }
+
+  Process {
+    id: terminalProc
+    command: ["sh", "-c",
+      "if command -v xdg-terminal-exec >/dev/null 2>&1; then echo xdg; "
+      + "elif command -v omarchy-default-terminal >/dev/null 2>&1; then omarchy-default-terminal 2>/dev/null; "
+      + "else printf '%s' \"${TERMINAL:-${TERMINAL_CMD:-kitty}}\"; fi"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyTerminalProbe(text || "")
+    }
+  }
+
+  // argv prefix for running `args` in a terminal window.
+  function terminalArgv(args) {
+    var run = root.terminalRunner
+    if (run === "xdg") return ["xdg-terminal-exec"].concat(args)
+    if (run !== "") return [run, "-e"].concat(args)
+    return ["kitty", "-e"].concat(args)
   }
 
   // ------------------------------------------------------------- the panel

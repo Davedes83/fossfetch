@@ -1826,6 +1826,43 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("Qt.callLater(root.focusWhenShown)", body)
         self.assertNotIn("refreshFocus()\n    root.ensureFreshScan()", src)
 
+    def test_processes_and_timers_are_reached_by_bare_id(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # `root.actionProc` / `root.confirmResetTimer` resolve to UNDEFINED in
+        # this scope and throw on assignment, while the identical single-action
+        # code writes the bare id and works. The batch path hit this: it had
+        # already set batchActive = true, so the bar showed "Working..." over a
+        # process that was never launched, and no terminal ever opened.
+        # Matched WITH the trailing dot, i.e. as a property access. The bug is
+        # always `root.actionProc.command = ...`; the comment explaining the
+        # trap mentions the bare `root.actionProc`, and a test that fails on
+        # its own documentation is a test nobody keeps.
+        for name in ("actionProc", "confirmResetTimer", "installFinishedTimer",
+                     "removeFinishedTimer"):
+            self.assertNotIn("root." + name + ".", src,
+                             "root.%s. does not resolve; use the bare id" % name)
+        # ...and the launch is genuinely still there, routed through the
+        # user's own terminal rather than a hard-coded kitty.
+        self.assertIn("actionProc.command = root.terminalArgv(", src)
+        self.assertIn("actionProc.running = true", src)
+
+    def test_terminal_is_the_users_own_not_a_hard_coded_kitty(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # `TERMINAL` is unset in the Omarchy shell's environment, so the old
+        # `if (!term) term = "kitty"` fallback meant every user who was not a
+        # kitty user got a window that could not start. xdg-terminal-exec
+        # reads ~/.config/xdg-terminals.list, which is where
+        # `omarchy default terminal <x>` records the user's choice.
+        self.assertIn("function terminalArgv", src)
+        self.assertIn("xdg-terminal-exec", src)
+        self.assertIn("omarchy-default-terminal", src)
+        # kitty survives only as the last resort, inside terminalArgv.
+        body = src[src.index("function terminalArgv"):]
+        body = body[:body.index("\n  }")]
+        self.assertEqual(body.count('\"kitty\"'), 1)
+
     def test_selection_is_keyed_not_indexed(self):
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()
