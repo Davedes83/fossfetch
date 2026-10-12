@@ -812,6 +812,48 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("UPD|pacman|gimp|2.10.38-6", p.stdout, p.stdout)
         self.assertNotIn("warning", p.stdout, p.stdout)
 
+    def test_failed_scan_is_not_reported_as_no_updates(self):
+        """A source that could not answer must not look like a clean empty scan.
+
+        `checkupdates` copies the sync databases to a temp dir first, so it
+        fails outright while anything holds the pacman lock -- which is exactly
+        when the eager post-startup scan runs. Its stderr used to be discarded,
+        so that failure produced zero rows and a confident `STATUS|ok|updates`.
+        The panel read that as "you have no updates", so the badge and the
+        Updates tab vanished and stayed vanished for five minutes while updates
+        were waiting.
+
+        So a failure has to be visible as a failure, and the panel has to refuse
+        to let an incomplete scan overwrite a known count with zero.
+        """
+        path = self.fake_bin(
+            "checkupdates",
+            'echo "==> ERROR: failed to init transaction" >&2\n'
+            'echo "==> ERROR: unable to lock database" >&2\n'
+            "exit 1\n")
+        self.fake_bin("yay", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertIn("SCANFAIL|checkupdates", p.stdout, p.stdout)
+        self.assertIn("STATUS|degraded|updates", p.stdout, p.stdout)
+        self.assertNotIn("STATUS|ok|updates", p.stdout,
+                         "a scan that failed must not claim to be clean")
+        # And the reason has to survive to be diagnosable -- the FIRST error
+        # line, which is the one that names the actual failure.
+        self.assertIn("failed to init transaction", p.stdout, p.stdout)
+
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # The panel keeps `unknown` distinct from `none`.
+        self.assertIn("if (degraded && rows.length === 0)", src)
+        self.assertIn("root.updatesDegraded = true", src)
+        self.assertIn("updateRetry.start()", src)
+        # updateCount is only ever written by a scan that actually completed.
+        guard = src[src.index("if (degraded && rows.length === 0)"):]
+        guard = guard[:guard.index("root.updateCount = rows.length")]
+        self.assertNotIn("root.updateCount = 0", guard,
+                         "an incomplete scan must never zero the known count")
+
     # ------------------------------------------------------------ QML static
     def test_model_js_unit_tests_pass(self):
         """Run tests/model_test.js. The pure logic in Model.js is what the
@@ -942,7 +984,7 @@ class FossFetchTests(unittest.TestCase):
         """
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()
-        start = src.index("function applyView()")
+        start = src.index("function applyView(")
         end = src.index("\n  }", start)
         body = src[start:end]
         self.assertIn("root.reindexModel()", body)
@@ -983,14 +1025,13 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("Model.passesFilter(row, "
                       "{ hideInstalled: root.hideInstalledActive })", body)
 
-    def test_sort_prefers_relevance_and_validates_the_stored_mode(self):
-        """Relevance must never be re-derived, and the persisted mode must be
-        validated.
+    def test_persisted_sort_mode_is_validated(self):
+        """The settings file is user-writable, so the stored mode is validated.
 
-        Sorting by relevance would discard the backends' ranking — the only
-        ordering that knows the query — replacing it with a name sort. And the
-        settings file is user-writable: an unrecognised mode would leave the
-        cycle index at -1, so Ctrl+S would step from nowhere."""
+        An unrecognised mode would leave the cycle index at -1, so Ctrl+S would
+        step from nowhere. (How relevance itself is preserved, and why it has to
+        be restorable rather than inert, is covered by
+        test_relevance_sorting_is_restorable_not_a_no_op.)"""
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()
         self.assertIn("property string sortMode: \"relevance\"", src)
@@ -1004,7 +1045,9 @@ class FossFetchTests(unittest.TestCase):
         # panel must delegate rather than reimplement a comparator inline.
         # (The pre-existing inline sorts are the relevance rankers and the
         # update-scan row order, which are deliberate and unrelated.)
-        self.assertIn("Model.sortRows(rows, root.sortMode)", src)
+        # effectiveSortMode(), not sortMode: a stored mode the current results
+        # cannot honour falls back to relevance rather than pretending to.
+        self.assertIn("Model.sortRows(rows, root.effectiveSortMode())", src)
 
     def test_sort_and_filter_have_keyboard_reachability(self):
         """The search field owns focus, so the controls need real shortcuts.
@@ -1080,6 +1123,84 @@ class FossFetchTests(unittest.TestCase):
         loader = loader[:loader.index("function visibleTabs()")]
         self.assertNotIn("catch (e) { /* keep defaults */ }", loader)
         self.assertIn("catch (e) { console.warn(", loader)
+
+    def test_relevance_sorting_is_restorable_not_a_no_op(self):
+        """Relevance must PUT THE BACKEND RANKING BACK, not do nothing.
+
+        The backend's ranking is the only ordering that knows the query, so it
+        cannot be re-derived from any field on a row — it has to be preserved as
+        an insertion order and restored on demand. Treating "relevance" as "leave
+        the list alone" meant that once you sorted by name, switching back to
+        Relevance kept the alphabetical order: a mode that silently does nothing,
+        which reads as a broken sort.
+
+        And a mode whose field is absent from every row must not reorder at all.
+        On Pacman results there is no popularity anywhere, so every pair ties and
+        the comparator falls through to the name tiebreak — alphabetical order
+        under a popularity label. Relevance and Popularity then produced
+        identical output and both looked broken.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        code = "\n".join(ln.split("//")[0] for ln in src.splitlines())
+
+        # Each row records when it was admitted, so the order can be restored.
+        self.assertIn("row._order = root.orderSeq++", code)
+        self.assertIn("root.orderSeq = 0", code, "the counter resets per search")
+        # Declared as a numeric role default so ListModel sees one type from the
+        # first append; ListModel cannot change a role's type later.
+        self.assertIn("_order", src)
+
+        # Relevance is applied through the sorter, not used as an early return.
+        body = src[src.index("function applyView("):]
+        body = body[:body.index("\n  }")]
+        self.assertIn("Model.sortRows(rows, root.effectiveSortMode())", body)
+        self.assertNotIn('if (root.sortMode === "relevance") return', body,
+                         "relevance must be restored, not skipped")
+
+        # The cycle only offers modes the current results can actually order by.
+        self.assertIn("function computeSortModes()", src)
+        self.assertIn("Model.popularityKey(r.aurPopularity) >= 0", src)
+        self.assertIn("Model.updatedKey(r.updated) >= 0", src)
+        self.assertIn("root.refreshSortModes()", body)
+        self.assertIn("root.availableSortModes = root.computeSortModes()", src)
+        self.assertIn("function effectiveSortMode()", src)
+
+    def test_a_new_sort_shows_the_top_card_but_settling_keeps_your_place(self):
+        """Selecting a sort resets to the top; a backend landing does not.
+
+        A new sort is a new top: the user asked for a different ordering and
+        should see its first card, not the viewport left wherever the previous
+        order happened to leave it — which lands them on an unrelated set of rows
+        halfway down and reads as the sort having jumped somewhere random.
+
+        applyView() is ALSO called each time a slow backend appends its results.
+        Resetting to the top there would yank the user away from wherever they
+        had scrolled to while waiting, so those calls must preserve the
+        highlighted package instead.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        body = src[src.index("function applyView("):]
+        body = body[:body.index("\n  }")]
+
+        self.assertIn("if (resetView)", body)
+        reset = body[body.index("if (resetView)"):]
+        self.assertIn("resultsList.positionViewAtBeginning()", reset)
+        self.assertIn("resultsList.currentIndex = after.length > 0 ? 0 : -1", reset)
+        # And the reset happens before the cursor-preserving branch, so a user
+        # change can never fall through into it.
+        self.assertLess(body.index("if (resetView)"),
+                        body.index("positionViewAtIndex"),
+                        "the reset must short-circuit before cursor preservation")
+        self.assertIn("resultsList.positionViewAtIndex(at, ListView.Contain)", body)
+
+        # User-initiated changes reset; backend completions do not.
+        self.assertIn("root.applyView(true)", src[src.index("function setSortMode(m)"):])
+        self.assertIn("root.applyView(true)", src[src.index("function setHideInstalled(v)"):])
+        settles = src.count("root.applyView()\n")
+        self.assertGreater(settles, 0,
+                           "backend completions must call applyView() with no reset")
 
     def test_alternatives_removed_and_all_is_opt_in(self):
         """Alternatives was dropped; the merged All tab must stay opt-in.

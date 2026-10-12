@@ -171,6 +171,12 @@ Panel {
   property string sortMode: "relevance"
   property bool hideInstalled: false
 
+  // Monotonic counter behind each row's insertion order. Relevance sorting is
+  // "put them back the way the backend ranked them", which needs the original
+  // sequence preserved — the backend's ranking is not re-derivable from any
+  // field on the row. Reset per search in buildModel().
+  property int orderSeq: 0
+
   function sortLabel(m) {
     if (m === "popularity") return "Popularity"
     if (m === "updated") return "Updated"
@@ -178,7 +184,42 @@ Panel {
     return "Relevance"
   }
 
-  function sortLabelFor() { return root.sortLabel(root.sortMode) }
+  function sortLabelFor() { return root.sortLabel(root.effectiveSortMode()) }
+
+  // The modes this result set can actually order by.
+  //
+  // A mode whose field is absent everywhere is worse than no mode at all:
+  // sorting Pacman results by "Popularity" finds no popularity on any row, so
+  // every pair ties and it falls through to the name tiebreak — alphabetical
+  // order wearing a popularity label. Offering it there makes Relevance and
+  // Popularity produce identical output, and both look broken. So the cycle
+  // only contains modes that will visibly do something here: popularity on
+  // AUR/Flathub results, Updated once build dates have arrived.
+  property var availableSortModes: Model.sortModes()
+
+  function computeSortModes() {
+    var hasPop = false
+    var hasDate = false
+    for (var i = 0; i < filteredModel.count && !(hasPop && hasDate); i++) {
+      var r = filteredModel.get(i)
+      if (!r) continue
+      if (!hasPop && Model.popularityKey(r.aurPopularity) >= 0) hasPop = true
+      if (!hasDate && Model.updatedKey(r.updated) >= 0) hasDate = true
+    }
+    var out = ["relevance"]
+    if (hasPop) out.push("popularity")
+    if (hasDate) out.push("updated")
+    out.push("name")
+    return out
+  }
+
+  // A stored mode that the current results cannot sort by (Popularity carried
+  // over from an AUR search, say) is shown and applied as Relevance rather than
+  // pretending to honour a preference it cannot.
+  function effectiveSortMode() {
+    return root.availableSortModes.indexOf(root.sortMode) >= 0
+      ? root.sortMode : "relevance"
+  }
 
   // Ctrl+S walks the cycle. Anything unrecognised (a hand-edited settings
   // file, a mode from a newer version) is normalised back to relevance rather
@@ -189,15 +230,17 @@ Panel {
   }
 
   function cycleSort() {
-    var i = root.sortModes.indexOf(root.sortMode)
-    root.setSortMode(root.sortModes[(i + 1) % root.sortModes.length])
+    var modes = root.availableSortModes
+    var i = modes.indexOf(root.effectiveSortMode())
+    if (i < 0) i = 0
+    root.setSortMode(modes[(i + 1) % modes.length])
   }
 
   function setSortMode(m) {
     var next = root.normalizeSort(m)
     if (next === root.sortMode) return
     root.sortMode = next
-    root.applyView()
+    root.applyView(true)
     root.persistOptions()
   }
 
@@ -207,7 +250,7 @@ Panel {
     // The rows already in the model have to be re-gated: this filter is applied
     // when a row is added, so rows admitted under the old setting are still
     // sitting there until the list is rebuilt.
-    root.applyView()
+    root.applyView(true)
     root.persistOptions()
   }
 
@@ -914,6 +957,8 @@ var upd = root.updateSpecFor(r)
     root.pkgIndex = ({})
     root.flatpakIndex = ({})
     root.hiddenInstalled = 0
+    root.orderSeq = 0
+    root.availableSortModes = root.sortModes
     resultsList.currentIndex = -1
   }
 
@@ -970,7 +1015,27 @@ var upd = root.updateSpecFor(r)
   // Nothing is touched when the new order matches the old one — a rebuild
   // destroys and recreates every delegate, and doing that on a no-op click would
   // flicker the list and reset scroll position for no reason.
-  function applyView() {
+  // Recompute which sorts this result set can offer. Separate from applyView()
+  // because the data that unlocks a mode arrives ASYNCHRONOUSLY: build dates
+  // come from the batched `pacman -Si` pass, AUR popularity from the RPC. A
+  // cycle computed at search time therefore omits "Updated" for as long as the
+  // cards are still showing no date, and the mode only appears after whatever
+  // unrelated action happens to re-run the sort.
+  function refreshSortModes() {
+    root.availableSortModes = root.computeSortModes()
+  }
+
+  // resetView: true when the USER changed the view (a new sort, or the filter).
+  // A new sort means a new top — show the first card of the new order rather
+  // than leaving the viewport wherever the previous order happened to leave it,
+  // which lands the user on an unrelated set of rows halfway down the list.
+  //
+  // False when the list is merely settling: backends append asynchronously, so
+  // applyView() also runs each time a slow source lands. Re-selecting the top
+  // card on every one of those would yank the user away from wherever they had
+  // scrolled to while waiting, so those calls keep their place.
+  function applyView(resetView) {
+    root.refreshSortModes()
     if (filteredModel.count === 0) return
     var rows = []
     var before = []
@@ -985,7 +1050,7 @@ var upd = root.updateSpecFor(r)
     // Counted even when nothing moved, so turning the filter back off has an
     // accurate number to restore rather than a stale one.
     root.hiddenInstalled = hidden
-    var after = Model.sortRows(rows, root.sortMode)
+    var after = Model.sortRows(rows, root.effectiveSortMode())
     var moved = after.length !== before.length
     if (!moved) {
       for (var j = 0; j < after.length; j++) {
@@ -1006,14 +1071,28 @@ var upd = root.updateSpecFor(r)
     // later metadata writes land on whichever package now sits at the old index.
     root.reindexModel()
 
+    if (resetView) {
+      resultsList.currentIndex = after.length > 0 ? 0 : -1
+      if (after.length > 0) resultsList.positionViewAtBeginning()
+      return
+    }
+
+    // Settling, not a deliberate change: keep the same package highlighted
+    // wherever the reordering put it, so rows arriving from a slow backend do
+    // not move the target out from under the cursor.
     var at = -1
     if (keepKey !== "") {
       for (var m = 0; m < after.length; m++) {
         if (root.rowKey(after[m]) === keepKey) { at = m; break }
       }
     }
-    resultsList.currentIndex = at >= 0 ? at : (after.length > 0 ? 0 : -1)
-    if (at >= 0) resultsList.positionViewAtIndex(at, ListView.Contain)
+    if (at >= 0) {
+      resultsList.currentIndex = at
+      resultsList.positionViewAtIndex(at, ListView.Contain)
+    } else {
+      resultsList.currentIndex = after.length > 0 ? 0 : -1
+      if (after.length > 0) resultsList.positionViewAtBeginning()
+    }
   }
 
   function rebuildResults() {
@@ -1135,9 +1214,12 @@ var upd = root.updateSpecFor(r)
   function applyUpdateScan(text) {
     var rows = []
     var keys = ({})
+    var degraded = false
     var lines = String(text || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
+      // A source that could not answer is not a source with nothing to report.
+      if (line.indexOf("SCANFAIL|") === 0) { degraded = true; continue }
       if (line.indexOf("UPD|") !== 0) continue
       var parts = line.split("|")
       if (parts.length < 4) continue
@@ -1163,6 +1245,19 @@ var upd = root.updateSpecFor(r)
     // Stable, deterministic order: newest available version first is meaningless
     // without a date, so sort by name for a list a user can scan by eye.
     rows.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
+    // A scan that could not reach a source does NOT get to say "zero updates".
+    // checkupdates fails outright while anything holds the pacman lock, which
+    // is what happens in the first seconds after a shell start; the old code
+    // turned that into a confident empty result, so the badge and the Updates
+    // tab vanished until the next five-minute tick even though updates were
+    // waiting. Keep whatever we already knew and come back shortly.
+    if (degraded && rows.length === 0) {
+      root.updatesDegraded = true
+      updateRetry.start()
+      return
+    }
+    root.updatesDegraded = false
+    updateRetry.stop()
     root.updateRows = rows
     root.updateKeys = keys
     root.updateCount = rows.length
@@ -1381,6 +1476,10 @@ var upd = root.updateSpecFor(r)
       conflictsWith: "", provides: "", groups: "", packager: "",
       branch: "", collection: ""
     }
+    // Insertion order. A NUMBER, so the role has one consistent type from the
+    // very first append — ListModel cannot change a role's type later, and a
+    // row without it would silently break every sort.
+    row._order = 0
     for (var key in strDefaults) {
       if (row[key] === undefined || row[key] === null) row[key] = strDefaults[key]
     }
@@ -1394,6 +1493,7 @@ var upd = root.updateSpecFor(r)
       root.hiddenInstalled++
       return
     }
+    row._order = root.orderSeq++
     filteredModel.append(row)
     var at = filteredModel.count - 1
     // First writer wins, matching the previous linear-scan behaviour.
@@ -2111,6 +2211,9 @@ var upd = root.updateSpecFor(r)
       if (licenses !== "") filteredModel.setProperty(idx, "licenses", licenses)
       if (buildDate !== "") filteredModel.setProperty(idx, "updated", buildDate)
     }
+    // Build Date is what makes "Updated" available at all, and it only exists
+    // once this batch has run.
+    root.refreshSortModes()
   }
 
   // ---------------------------------------------------------------- install
@@ -2363,6 +2466,24 @@ var upd = root.updateSpecFor(r)
   // spawn a checkupdates subprocess every time. The scan talks to three package
   // managers, two of which can reach the network, so it is never run on top of
   // itself.
+  // True when the last scan could not reach at least one source. Kept separate
+  // from updateCount so "unknown" is never collapsed into "none".
+  property bool updatesDegraded: false
+
+  // Short retry after a degraded scan. The common cause is a transient pacman
+  // lock during startup, which clears in seconds; waiting the full five minutes
+  // would leave the badge blank for most of the session.
+  Timer {
+    id: updateRetry
+    interval: 25000
+    repeat: true
+    running: false
+    onTriggered: {
+      if (!root.updatesDegraded) { updateRetry.stop(); return }
+      root.refreshUpdates()
+    }
+  }
+
   function ensureFreshScan() {
     if (Date.now() - root.updatesAt > 60000) root.refreshUpdates()
   }
@@ -3581,6 +3702,7 @@ Icon {
             }
           }
         }
+
 
         // ---------------------------------------------------- recent searches
         // Only meaningful when nothing is typed: a live tab shows its own

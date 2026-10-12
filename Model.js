@@ -342,11 +342,14 @@ function needsUpdate(avail, inst) {
 
 // Sort modes in cycle order (Ctrl+S walks this list).
 //
-// "relevance" is deliberately NOT a comparator. Each backend already appends
-// its results in relevance order — exact name hit, then prefix, then substring,
-// then fuzzy, with AppStream category members boosted — and the append order IS
-// that ranking. Sorting it again would throw away the only signal that knows
-// about the user's actual query, so this mode returns the list untouched.
+// "relevance" is not a comparator over any field — it restores the order the
+// rows arrived in, which each backend already ranked: exact name hit, then
+// prefix, substring, fuzzy, with AppStream category members boosted. That
+// ranking knows the user's query in a way no stored key can reproduce, so it
+// must never be re-derived. But it MUST be restorable: without an explicit
+// insertion order, sorting by name throws the backend's ranking away and
+// "Relevance" becomes a no-op that can never undo the change, which reads to
+// the user as a sort that silently does nothing.
 var SORT_MODES = ["relevance", "popularity", "updated", "name"];
 
 // Exposed as a FUNCTION, not read straight off the array. A `.js` imported into
@@ -400,6 +403,40 @@ function byUpdated(a, b) {
     return d !== 0 ? d : byName(a, b);
 }
 
+// Insertion order, assigned once when a row is admitted. Sorting by it
+// reproduces exactly the sequence the backends produced, which is what makes
+// Relevance a real mode rather than a no-op. Rows that predate the field (or
+// arrive without one) all compare equal, and the sort stays stable, so an
+// older caller still gets the backend order rather than a scramble.
+function orderKey(row) {
+    var v = row && row._order;
+    var n = parseInt(v, 10);
+    return isNaN(n) ? 0 : n;
+}
+
+function byOrder(a, b) {
+    var d = orderKey(a) - orderKey(b);
+    return d !== 0 ? d : byName(a, b);
+}
+
+// True when at least one row actually carries the field a mode sorts on.
+//
+// This matters more than it looks. Sorting the Pacman results by "Popularity"
+// finds no popularity on ANY row, so every pair ties and the comparator falls
+// through to the name tiebreak — producing alphabetical order under a
+// popularity label. Two different modes, one ordering, no visible difference:
+// the sort looks broken even though it ran. Refusing to reorder when there is
+// nothing to compare is the honest answer.
+function anyField(rows, key) {
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        if (!r) continue;
+        if (key === "updated" ? updatedKey(r.updated) >= 0 : popularityKey(r.aurPopularity) >= 0)
+            return true;
+    }
+    return false;
+}
+
 // Reorder a result set for a sort mode. Returns a NEW array; the caller's is
 // never mutated, so the caller can keep the pre-sort order for comparison.
 //
@@ -412,11 +449,16 @@ function sortRows(rows, mode) {
     var n = rows ? rows.length : 0;
     for (var i = 0; i < n; i++) arr.push(rows[i]);
     var m = String(mode === undefined || mode === null ? "relevance" : mode);
-    if (m === "popularity") arr.sort(byPopularity);
-    else if (m === "updated") arr.sort(byUpdated);
-    else if (m === "name") arr.sort(byName);
-    // "relevance", plus anything unrecognised, falls through to the backend's
-    // own ranking rather than inventing one.
+    if (m === "relevance") {
+        // Restore the backend ranking rather than inventing one.
+        arr.sort(byOrder);
+    } else if (m === "popularity") {
+        if (anyField(arr, "popularity")) arr.sort(byPopularity);
+    } else if (m === "updated") {
+        if (anyField(arr, "updated")) arr.sort(byUpdated);
+    } else if (m === "name") {
+        arr.sort(byName);
+    }
     return arr;
 }
 
@@ -456,6 +498,7 @@ if (typeof module !== "undefined" && module.exports) {
         needsUpdate: needsUpdate,
         sortModes: sortModes,
         sortRows: sortRows,
+        orderKey: orderKey,
         updatedKey: updatedKey,
         popularityKey: popularityKey,
         isInstalledRow: isInstalledRow,

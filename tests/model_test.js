@@ -113,15 +113,21 @@ function names(rows) {
     return out;
 }
 
-// Relevance is the default and must NOT reorder: the backends already appended
-// in relevance order and that ranking knows the query, which no sort key here
-// does. An unrecognised mode has to be as inert as relevance rather than
-// falling through to something arbitrary.
-eq(names(Model.sortRows(sorted, "relevance")),
-   ["middle", "undated", "popular", "noPopularityField"],
-   "relevance preserves the backend's own ranking");
-eq(names(Model.sortRows(sorted, "nonsense-mode")),
-   ["middle", "undated", "popular", "noPopularityField"],
+// Fixtures carry an insertion order, because Relevance is about RESTORING the
+// backend ranking rather than being inert. `_order` is assigned as rows are
+// admitted, so relevance can undo a name sort instead of silently keeping it —
+// a no-op mode reads to the user as a sort that does nothing.
+var ordered = [
+    {name: "zeta", _order: 0, aurPopularity: "", updated: ""},
+    {name: "alpha", _order: 1, aurPopularity: "", updated: ""},
+    {name: "mu", _order: 2, aurPopularity: "", updated: ""}
+];
+eq(names(Model.sortRows(ordered, "name")), ["alpha", "mu", "zeta"], "name reorders");
+eq(names(Model.sortRows(ordered, "relevance")), ["zeta", "alpha", "mu"],
+   "relevance restores the backend's insertion order after a name sort");
+eq(Model.orderKey({_order: "7"}), 7, "order key parses");
+eq(Model.orderKey({}), 0, "a row with no insertion order is not reordered wildly");
+eq(names(Model.sortRows(ordered, "nonsense-mode")), ["zeta", "alpha", "mu"],
    "an unknown sort mode falls back to relevance instead of inventing an order");
 
 // Popularity descending. A row with NO popularity field must sink below a row
@@ -130,6 +136,24 @@ eq(names(Model.sortRows(sorted, "nonsense-mode")),
 eq(names(Model.sortRows(sorted, "popularity")),
    ["popular", "middle", "noPopularityField", "undated"],
    "popularity sorts descending and puts missing values last");
+
+// A mode whose field is absent from EVERY row must not reorder at all.
+// Sorting Pacman results by popularity finds nothing to compare, so every pair
+// ties and the comparator falls through to the name tiebreak: alphabetical
+// order wearing a popularity label, identical to the Name mode. Two modes, one
+// ordering — the sort looks broken even though it ran.
+eq(names(Model.sortRows([
+    {name: "gimp", _order: 0, aurPopularity: ""},
+    {name: "audacity", _order: 1, aurPopularity: ""}
+], "popularity")),
+   ["gimp", "audacity"],
+   "popularity with no popularity data anywhere leaves the order alone");
+eq(names(Model.sortRows([
+    {name: "gimp", _order: 0, updated: ""},
+    {name: "audacity", _order: 1, updated: ""}
+], "updated")),
+   ["gimp", "audacity"],
+   "updated with no build dates anywhere leaves the order alone");
 
 // Updated newest-first. Sorting the formatted string would be the bug this
 // guards: "1 Feb 2024" < "11 Feb 2024" as text, so the 11th would land first.
@@ -145,11 +169,14 @@ eq(names(Model.sortRows([
    ["aerc", "apache", "Zathura", "Zoom"],
    "name sorting is case-insensitive");
 
-// Ties must resolve to a stable alphabetical order, not to sort-engine luck:
-// two undated rows come out the same way every time.
-var tie = Model.sortRows([{name: "b", updated: ""}, {name: "a", updated: ""}], "updated");
-eq(names(tie), ["a", "b"], "tied rows fall back to name");
-eq(names(Model.sortRows([{name: "a", updated: ""}, {name: "b", updated: ""}], "updated")),
+// Ties must resolve to a stable alphabetical order, not to sort-engine luck.
+// These carry the SAME date on purpose: a row with no date at all would not
+// reach the comparator, since a set with no dates is left in place.
+var sameDay = "Mon 2 Jun 2025 03:04:05 PM UTC";
+eq(names(Model.sortRows([{name: "b", updated: sameDay}, {name: "a", updated: sameDay}], "updated")),
+   ["a", "b"],
+   "rows tied on the sort key fall back to name");
+eq(names(Model.sortRows([{name: "a", updated: sameDay}, {name: "b", updated: sameDay}], "updated")),
    ["a", "b"],
    "a tie does not depend on the input order");
 

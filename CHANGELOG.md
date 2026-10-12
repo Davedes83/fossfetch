@@ -51,6 +51,16 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **A failed update scan reported itself as "no updates".** `checkupdates`
+  copies the sync databases to a temp dir before comparing, so it fails outright
+  while anything holds the pacman lock — which is what happens in the seconds
+  after a shell start, when the eager scan first runs. Its stderr was discarded,
+  so that failure produced zero rows and a confident `STATUS|ok|updates`. The
+  panel read it as a clean result: the badge and the Updates tab disappeared and
+  stayed gone for the next five minutes while updates were waiting, with no
+  error anywhere. A source that could not answer now says so (`SCANFAIL` /
+  `STATUS|degraded`), an incomplete scan never overwrites a known count with
+  zero, and it retries in 25s rather than waiting out the full interval.
 - **Recent searches recorded every keystroke.** Live search runs on each
   debounced prefix, and each one was filed as its own recent — typing
   "vivaldi" left `via`, `vial`, `vival`, `vivald` and `vivaldi` behind as five
@@ -68,6 +78,25 @@ already out of date, which is the other half of what a package manager is for.
   overwrote the saved preferences. The loader now reports failures instead of
   swallowing them, and a test asserts every `Model.x` the panel references is
   declared at top level.
+- **Relevance sorting could not be undone, and Popularity was a relabelled
+  Name sort.** Relevance was treated as "leave the order alone", so once you
+  sorted by name, switching back kept the alphabetical order — a mode that
+  silently does nothing. Rows now carry their insertion order, which is the
+  backend's own relevance ranking, and Relevance restores it. Separately,
+  sorting Pacman results by Popularity found no popularity on any row, so every
+  pair tied and the comparator fell through to its name tiebreak: alphabetical
+  order wearing a popularity label, identical to the Name mode. A mode whose
+  field is absent from every row no longer reorders at all, and the cycle only
+  offers modes the current results can actually order by.
+- **Changing the sort kept the old scroll position.** The viewport was left
+  where the previous order happened to leave it, which after a re-sort points at
+  an unrelated set of rows and reads as the list jumping at random. Selecting a
+  sort now shows the top card of the new order; results merely settling from a
+  slow backend still keep your place.
+- **The "Updated" mode was missing from the cycle.** Which sorts are offered was
+  computed once, before the batched `pacman -Si` pass had supplied any build
+  dates — so the cycle offered a sort the cards could not yet support, and
+  gained it only after some unrelated action happened to re-run the sort.
 - **Sorting blanked the cards.** `QQmlListModel.get()` returns objects bound to
   the live rows, so clearing the model to reorder emptied them too —
   re-appending gave cards with no name, no chips and no icon. Rows are now
