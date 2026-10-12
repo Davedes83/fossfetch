@@ -73,11 +73,26 @@ snapshot marks every card that is on the machine: the button becomes an inert
 never a surprise. The snapshot is refreshed at most once a minute and again
 after an install is launched.
 
-### Two toolbar icon designs
-The "Find App" pill in the bar restyles itself live. Choose from the options
-panel: **Pill** (magnifier chip + label) or **Icon** (a bare magnifying-glass
-glyph). The setting is pushed to the bar widget in real time and persists. When
-updates are pending, the button also carries a count badge.
+### Five toolbar icon designs
+The button in the bar restyles itself live. Choose from the options panel:
+
+| Design | Shows |
+| --- | --- |
+| **Icon** | A bare magnifying-glass glyph — the first-install default |
+| **Circle** | The glyph on a filled circle: the pill's shape without its wording |
+| **Text** | Glyph + "Find App", no chip |
+| **Brand** | Glyph + "FossFetch", no chip |
+| **Pill** | Glyph + "Find App" on a filled, bordered chip |
+
+The magnifier keeps the same grey circle behind it on every style that has a
+label, so the borderless ones read as the pill's own control rather than loose
+text. The circle reuses the pill's fill and chip rather than restating them, so
+the two cannot drift apart. When updates are pending, the button carries a
+count badge.
+
+A fresh install starts on **Icon**. An install that already has a settings file
+keeps whatever it chose — a default is for people who have no preference yet,
+not a change made to people who already have one.
 
 ### Updates
 The other half of a package manager: knowing what is already out of date.
@@ -227,7 +242,7 @@ In `~/.config/hypr/bindings.lua` (any combo you like — `F` is just a
 suggestion):
 
 ```lua
-o.bind("SUPER + ALT + F", "FossFetch", "omarchy-shell fossfetch toggle")
+o.bind("SUPER + CTRL + SHIFT + F", "FossFetch", "omarchy-shell fossfetch toggle")
 ```
 
 The panel can also be toggled over IPC with
@@ -248,7 +263,7 @@ or a malformed QML file fails the build instead of the panel.
 
 ## Usage
 
-1. Press `SUPER + ALT + F` (or click the magnifier pill in the bar).
+1. Press `SUPER + CTRL + SHIFT + F` (or click the magnifier button in the bar).
 2. Type a query:
    - a package / app name → exact, prefix and substring matches ranked first;
    - a natural-language phrase → category members listed, then name matches.
@@ -271,7 +286,7 @@ The plugin ships sensible defaults; the shell's settings UI exposes the
 |---------|---------|-------------|
 | `panelWidth` | 560 | Width of the search popup (360–900) |
 | `debounceMs` | 150 | Delay after typing before searching (0–500) |
-| `buttonLabel` | "Find App" | Text on the bar pill (hidden in Icon design) |
+| `buttonLabel` | "Find App" | Text on the bar button (hidden on Icon and Circle) |
 
 Options chosen in the panel are persisted to
 `~/.local/state/omarchy/settings/davedes.fossfetch.json`:
@@ -282,8 +297,9 @@ Options chosen in the panel are persisted to
   "aur": true,
   "all": false,
   "aurHelper": "yay",
-  "design": "current",
-  "showCoffee": true
+  "design": "icon",
+  "showCoffee": true,
+  "supportEpoch": "2026-10-12a"
 }
 ```
 

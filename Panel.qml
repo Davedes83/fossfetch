@@ -156,6 +156,18 @@ Panel {
   property bool allEnabled: false
   property string aurHelper: "yay"
   property bool showCoffeeButton: true
+
+  // The supporter prompt is re-shown once per RELEASE, not once per launch.
+  //
+  // Bump this on any user-visible update and the box comes back ticked; the
+  // user can untick it again and that choice holds until the NEXT bump. The
+  // alternative -- a plain `true` default -- would mean a user who unticks it
+  // never sees it again, and the project gets no way to ask after a release
+  // that actually changed things.
+  //
+  // It is a checkbox, not a modal: nothing is blocked, nothing is decided for
+  // the user, and one click turns it off again.
+  readonly property string supportPromptEpoch: "2026-10-12a"
   property bool showOptions: false
 
   // ------------------------------------------------------------ result view
@@ -612,8 +624,13 @@ function batchPkgCount(mode) {
   // See BarWidget.qml: "pill" (default) or "icon". The six-way picker that
   // used to live in Settings is gone; those styles are normalised onto "pill"
   // on load so an existing settings file can't leave the bar unstyled.
-  readonly property var designs: ["pill", "icon"]
-  property string panelDesign: "pill"
+  readonly property var designs: ["pill", "icon", "circle", "text", "brand"]
+  // "icon" for a first install, and "pill" for an install that already has a
+  // settings file without a stored choice. The two are different situations:
+  // a fresh install has nobody's bar to restyle, while an existing user whose
+  // file predates this setting is on whatever they have been looking at, and
+  // silently switching them is not a default, it is a change.
+  property string panelDesign: "icon"
 
   function normalizeDesign(d) {
     return root.designs.indexOf(d) !== -1 ? d : "pill"
@@ -738,6 +755,8 @@ function batchPkgCount(mode) {
       aurHelper: root.aurHelper,
       design: root.panelDesign,
       showCoffee: root.showCoffeeButton,
+      supportEpoch: root.supportPromptEpoch,
+      hotkeyInstalled: root.hotkeyInstalled,
       sortMode: root.sortMode,
       hideInstalled: root.hideInstalled,
       recentSearches: root.recentSearches
@@ -758,16 +777,36 @@ function batchPkgCount(mode) {
     printErrors: false
     onLoaded: {
       try {
-        var data = JSON.parse(text())
+        var raw = text()
+        // No settings file at all: this is a first install, so the declared
+        // default ("icon") stands and nothing is written yet. Writing an
+        // options file on a mere load would create one for a user who has not
+        // touched anything.
+        if (raw === undefined || raw === null || String(raw).trim() === "") return
+        var data = JSON.parse(raw)
         if (typeof data.flatpak === "boolean") root.flatpakEnabled = data.flatpak
         if (typeof data.aur === "boolean") root.aurEnabled = data.aur
         if (typeof data.all === "boolean") root.allEnabled = data.all
         if (data.aurHelper === "yay" || data.aurHelper === "paru") root.aurHelper = data.aurHelper
-        if (typeof data.showCoffee === "boolean") root.showCoffeeButton = data.showCoffee
+        // The supporter prompt is re-armed once per release. A stored epoch
+        // from an older release -- or none at all, which is every existing
+        // install -- means this is an update, so the box defaults to ticked.
+        //
+        // The epoch is written back straight away: without that the stored
+        // value would still be stale on the next launch, re-arming the prompt
+        // every time and making the untick impossible to keep.
+        var storedEpoch = (typeof data.supportEpoch === "string") ? data.supportEpoch : ""
+        if (storedEpoch !== root.supportPromptEpoch) {
+          root.showCoffeeButton = true
+          root.persistOptions()
+        } else if (typeof data.showCoffee === "boolean") {
+          root.showCoffeeButton = data.showCoffee
+        }
         // The settings file is user-writable, so the sort mode is validated
         // against the known list rather than trusted: an unknown value would
         // leave the cycle index at -1 and Ctrl+S would step from nowhere.
         root.sortMode = root.normalizeSort(data.sortMode)
+        if (typeof data.hotkeyInstalled === "boolean") root.hotkeyInstalled = data.hotkeyInstalled
         if (typeof data.hideInstalled === "boolean") root.hideInstalled = data.hideInstalled
         root.panelDesign = root.normalizeDesign(data.design)
         if (Array.isArray(data.recentSearches)) {
@@ -807,6 +846,16 @@ function batchPkgCount(mode) {
     // Tab is a commit: the user has decided what they searched for.
     root.flushRecent()
     if (activeTab === t) return
+    // Retire any search still in flight BEFORE switching.
+    //
+    // rebuildResults() correctly repopulates the Updates tab from the scan's
+    // own rows, but a Flatpak or AUR search launched a moment earlier was
+    // still running, and its results handler only compares its own sequence
+    // against searchSeq. With nothing changing that sequence, the late rows
+    // passed the check and were appended to a list they had nothing to do
+    // with -- so a search for "firefox" left Datcord and Deckr sitting in
+    // Updates next to the one package that actually had an update.
+    searchSeq++
     activeTab = t
     resultsList.currentIndex = -1
     rebuildResults()
@@ -1810,6 +1859,9 @@ var upd = root.updateSpecFor(r)
   // indented description lines, so each result carries its real description.
   function onPacmanResults(text) {
     if (pacmanProc.mySeq !== searchSeq) return
+    // Belt and braces: the Updates tab is the scan's result set, not a
+    // search. A late row must never land in it, whatever the sequence says.
+    if (root.isUpdates) return
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
@@ -1942,6 +1994,9 @@ var upd = root.updateSpecFor(r)
 
   function onFlatpakResults(text) {
     if (flatpakProc.mySeq !== searchSeq) return
+    // Belt and braces: the Updates tab is the scan's result set, not a
+    // search. A late row must never land in it, whatever the sequence says.
+    if (root.isUpdates) return
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
@@ -1992,6 +2047,9 @@ var upd = root.updateSpecFor(r)
   // exact/prefix package-name hit sorts above description-only matches.
   function onAurResults(text) {
     if (aurProc.mySeq !== searchSeq) return
+    // Belt and braces: the Updates tab is the scan's result set, not a
+    // search. A late row must never land in it, whatever the sequence says.
+    if (root.isUpdates) return
     var q = root.query.toLowerCase().trim()
     if (q === "") return
     var lines = String(text || "").split("\n")
@@ -2217,6 +2275,8 @@ var upd = root.updateSpecFor(r)
   // Absolute path to the bundled AppStream-catalog icon resolver.
   readonly property string appstreamIconScript: Qt.resolvedUrl("./appstream_icons.sh").toString().replace("file://", "")
   readonly property string appstreamGroupsScript: Qt.resolvedUrl("./appstream_groups.sh").toString().replace("file://", "")
+  readonly property string installHotkeyScript: Qt.resolvedUrl("./install_hotkey.sh").toString().replace("file://", "")
+  readonly property string hotkeyCombo: "SUPER + CTRL + SHIFT + F"
   readonly property string iconCacheDir: Quickshell.env("HOME") + "/.cache/fossfetch"
 
   // Resolve every icon-less row against Arch's published AppStream catalog in
@@ -2776,10 +2836,36 @@ var upd = root.updateSpecFor(r)
     return false
   }
 
+  // A launcher with no shortcut is not a launcher. Installed once, on the
+  // first open, and only if the user has not already bound it themselves --
+  // install_hotkey.sh checks every file in the hypr config dir first, so this
+  // never adds a second binding on top of one they wrote by hand.
+  //
+  // Guarded by a persisted flag as well as the script's own check: if a user
+  // deletes the line, that is a decision, and it must not be undone by the
+  // plugin re-adding it on every launch.
+  property bool hotkeyInstalled: false
+
+  function ensureHotkey() {
+    if (root.hotkeyInstalled) return
+    root.hotkeyInstalled = true
+    root.persistOptions()
+    hotkeyProc.command = ["sh", root.installHotkeyScript,
+                          Quickshell.env("HOME") + "/.config/hypr", root.hotkeyCombo]
+    hotkeyProc.running = false
+    hotkeyProc.running = true
+  }
+
+  Process {
+    id: hotkeyProc
+    stdout: StdioCollector { waitForEnd: true }
+  }
+
   function open() {
     root.controller.show()
     root.ensureFreshScan()
     root.detectTerminal()
+    root.ensureHotkey()
     root.focusWhenShown()
   }
 
@@ -3436,16 +3522,37 @@ property string terminalRunner: ""   // "" | "xdg" | "<name>"
                 spacing: Style.spacing.sm
 
                 HelperPill {
-                  glyph: root.icons.box
-                  label: "Button"
-                  selected: root.panelDesign === "pill"
-                  onClicked: root.setPanelDesign("pill")
-                }
-                HelperPill {
                   glyph: root.icons.search
-                  label: "Icon only"
+                  label: "Icon"
                   selected: root.panelDesign === "icon"
                   onClicked: root.setPanelDesign("icon")
+                }
+                // No glyph: the icon set has no plain circle, and inventing a
+                // codepoint that may not be in the installed font renders as
+                // tofu. HelperPill hides an empty glyph, so the label stands
+                // on its own.
+                HelperPill {
+                  label: "Circle"
+                  selected: root.panelDesign === "circle"
+                  onClicked: root.setPanelDesign("circle")
+                }
+                HelperPill {
+                  glyph: root.icons.box
+                  label: "Text"
+                  selected: root.panelDesign === "text"
+                  onClicked: root.setPanelDesign("text")
+                }
+                HelperPill {
+                  glyph: root.icons.box
+                  label: "Brand"
+                  selected: root.panelDesign === "brand"
+                  onClicked: root.setPanelDesign("brand")
+                }
+                HelperPill {
+                  glyph: root.icons.box
+                  label: "Pill"
+                  selected: root.panelDesign === "pill"
+                  onClicked: root.setPanelDesign("pill")
                 }
               }
             }
@@ -3671,8 +3778,14 @@ Icon {
                   event.accepted = true
                 } else if (event.key === Qt.Key_F2) {
                   // Look before you commit. Enter installs; F2 opens the details
-                  // sheet for the highlighted row. A printable key cannot be used
-                  // here because the search field owns focus and would type it.
+                  // sheet for the highlighted row.
+                  //
+                  // F2 only, deliberately. SUPER+CTRL+SHIFT+F also opens this
+                  // panel, and Hyprland consumes a bound combo before the
+                  // focused client ever sees it -- so binding it here too would
+                  // have been dead code that still read as a working shortcut,
+                  // and pressing it inside the panel would toggle the panel
+                  // shut instead of opening anything.
                   root.openDetailsCursor()
                   event.accepted = true
                 } else if (event.key === Qt.Key_S && (event.modifiers & Qt.ControlModifier)) {
@@ -3833,6 +3946,7 @@ Icon {
             model: filteredModel
             currentIndex: -1
             focus: false
+
 
             // Without this the panel scrolls silently: three cards are visible
             // and up to sixty exist, with no cue that the list continues.
@@ -4414,12 +4528,6 @@ Icon {
     }
   }
 
-  // ------------------------------------------------------- details sheet
-  // A separate PopupCard rather than an inline expansion: the results list has
-  // a fixed three-row viewport, so growing a card would either overflow the
-  // panel or force the layout to be recomputed mid-interaction. A popup keeps
-  // the grid exactly where it is and gives the dependency text room to be
-  // readable.
   // ------------------------------------------------------- details sheet
   // A separate PopupCard rather than an inline expansion: the results list has
   // a fixed three-row viewport, so growing a card would either overflow the

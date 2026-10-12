@@ -59,6 +59,22 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Added
 
+- **Five toolbar designs, along one axis — how much chrome sits behind the
+  magnifier.** `Icon` (a bare glyph, and the first-install default), `Circle`
+  (the pill's shape without its wording), `Text` (glyph + "Find App", no chip),
+  `Brand` (glyph + "FossFetch", no chip) and `Pill`. The magnifier keeps the
+  same grey circle on every style that has a label, so the borderless ones read
+  as the pill's own control rather than loose text.
+- **The supporter prompt is re-shown once per release.** It comes back ticked
+  on any update; untick it and it stays unticked until the next one. Still a
+  plain checkbox — nothing is blocked and nothing is decided for the user.
+- **`SUPER + CTRL + SHIFT + F` toggles the panel** from anywhere, installed
+  into `~/.config/hypr/hyprland.lua` on first run. `SUPER + SHIFT + F` is
+  already Omarchy's "open files" and `SUPER + ALT + F` its "full width", so
+  the extra `CTRL` is what keeps the binding clear of both. Details stays on
+  `F2`: Hyprland consumes a bound combo before the focused client ever sees
+  it, so the same chord inside the panel would have toggled it shut.
+
 - **Multi-select and batch actions.** `Space` marks the highlighted row and
   steps down, `Shift`+`↑↓` extends a range, `Ctrl+A` takes everything, and
   `Esc` puts the marks down again. A bar appears while anything is marked,
@@ -77,6 +93,11 @@ already out of date, which is the other half of what a package manager is for.
   arm-then-run second click.
 
 ### Fixed
+
+- **A first install did not get the toolbar it was supposed to.** "Icon" is now
+  the default when there is no settings file at all. An install that already
+  has one keeps its choice — and a file without a stored design falls back to
+  the historical "pill" rather than being switched under the user.
 
 - **Batch actions never launched anything.** The batch runner reached the
   process through `root.actionProc`, which resolves to `undefined` in this

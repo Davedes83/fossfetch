@@ -27,10 +27,22 @@ BarWidget {
   // identical options was itself the thing making the bar look provisional.
   // One opinionated default, plus one compact alternative.
   //
-  //   "pill" — magnifier chip + "Find App" label (default)
-  //   "icon" — bare magnifier, no chip, no label, no border
-  property string toolbarDesign: "pill"
-  readonly property var designs: ["pill", "icon"]
+  // Four styles, along one axis — how much chrome sits behind the magnifier —
+  //   "icon"   — magnifier alone. No fill, no border, no label. (first install)
+  //   "circle" — magnifier alone on a dark circle, the pill's shape without
+  //              its wording. The compromise for a bar that wants a visible
+  //              target without the width a label costs.
+  //   "text"   — magnifier + "Find App", no chip. Same wording as "pill".
+  //   "brand"  — magnifier + "FossFetch", no chip. Same chrome as "text", the
+  //              product's own name instead of a description of what it does.
+  //   "pill"   — magnifier + "Find App" on a filled, bordered chip.
+  //
+  // "icon" is the FIRST-INSTALL default, and the two cases are kept apart on
+  // purpose: a fresh install has nobody's bar to restyle, whereas an existing
+  // user whose settings file has no stored choice is on whatever they have
+  // been looking at and must not be switched under them.
+  property string toolbarDesign: "icon"
+  readonly property var designs: ["pill", "icon", "circle", "text", "brand"]
 
   // Material Design magnify, U+F0349 — the same glyph as `icons.search` in
   // Panel.qml, read out of the installed JetBrainsMono Nerd Font and written as
@@ -54,12 +66,39 @@ BarWidget {
     printErrors: false
     onLoaded: {
       try {
-        root.toolbarDesign = root.normalizeDesign(JSON.parse(text()).design)
+        var raw = text()
+        // No settings file: a first install. The declared default stands, and
+        // nothing is written here -- creating an options file on a mere load
+        // would do that for a user who has changed nothing.
+        if (raw === undefined || raw === null || String(raw).trim() === "") return
+        root.toolbarDesign = root.normalizeDesign(JSON.parse(raw).design)
       } catch (e) { /* keep default */ }
     }
   }
 
-  readonly property bool bareIcon: root.toolbarDesign === "icon"
+  // No label: the magnifier alone.
+  readonly property bool bareIcon:
+    root.toolbarDesign === "icon" || root.toolbarDesign === "circle"
+
+  // No fill, no border, no glow. "icon", "text" and "brand" draw the SAME
+  // chrome-free button and differ only in the label; keying the chrome helpers
+  // off this rather than off bareIcon is what keeps them from drifting apart.
+  // "circle" is excluded: it carries the pill's fill on purpose.
+  // The shell's own bar icon box (Style.bar.iconSlot), which is what every
+  // other circular button in the bar is sized from -- the coffee, clipboard
+  // and tray icons. Matching it is the whole point of this style: a disc that
+  // is even a pixel off reads as a different control sitting in the same bar,
+  // and deriving the size from the icon canvas instead produced exactly that.
+  readonly property int circleSize: Style.bar.iconSlot
+
+  readonly property bool borderless:
+    root.toolbarDesign === "icon" || root.toolbarDesign === "text"
+    || root.toolbarDesign === "brand"
+
+  // "brand" is the one style that does not use the user's configurable
+  // buttonLabel: the whole point of it is to say what the thing is called.
+  readonly property string labelText:
+    root.toolbarDesign === "brand" ? "FossFetch" : root.buttonLabel
   readonly property bool hot: mouseArea.containsMouse || root.opened
 
   // ---- update badge ---------------------------------------------------------
@@ -87,38 +126,58 @@ BarWidget {
   function btnRadius() { return button.height / 2 }
 
   function btnBorderWidth() {
-    if (root.bareIcon) return 0
+    // The circle is the pill's shape without its edge: filled like the pill so
+    // it reads as the same control, unbordered so it does not read as identical.
+    if (root.toolbarDesign === "circle") return 0
+    if (root.borderless) return 0
     return root.hot ? 2 : 1
   }
 
   function btnBorder() {
-    if (root.bareIcon) return "transparent"
+    if (root.borderless) return "transparent"
     return root.hot
       ? Util.alpha(root.accentColor, 0.9)
       : Util.alpha(root.foregroundColor, 0.16)
   }
 
   function btnFillTop() {
-    if (root.bareIcon) return "transparent"
+    // A borderless button has no ring to light up, so hover is a soft tint
+    // instead. Without this the "text" style would give the user no feedback
+    // at all — the one thing that tells you the button is clickable.
+    if (root.borderless)
+      return (root.hot || mouseArea.pressed) ? Util.alpha(root.accentColor, 0.16) : "transparent"
     if (mouseArea.pressed || root.opened) return Util.alpha(root.accentColor, 0.30)
     return mouseArea.containsMouse ? Util.alpha(root.accentColor, 0.22) : Util.alpha(root.surfaceAlt, 0.90)
   }
 
   function btnFillBottom() {
-    if (root.bareIcon) return "transparent"
+    if (root.borderless)
+      return (root.hot || mouseArea.pressed) ? Util.alpha(root.accentColor, 0.08) : "transparent"
     if (mouseArea.pressed || root.opened) return Util.alpha(root.accentColor, 0.20)
     return mouseArea.containsMouse ? Util.alpha(root.accentColor, 0.13) : Util.alpha(root.surfaceAlt, 0.55)
   }
 
-  function btnGlow() { return root.hot ? 0.5 : 0 }
+  // The accent ring only suits a button that has a border to light up.
+  function btnGlow() { return (root.hot && !root.borderless) ? 0.5 : 0 }
 
   function chipRadius() { return button.height / 2 }
 
+  // The grey circle behind the magnifier survives on every style that still
+  // carries a label. It is only dropped for "icon", which exists to be a bare
+  // glyph, and for "circle", where the BUTTON is already that circle and a
+  // second one inside it would read as a ring.
   function chipFill() {
-    if (root.bareIcon) return "transparent"
-    return root.hot
-      ? Util.alpha(root.accentColor, 0.30)
-      : Util.alpha(root.foregroundColor, 0.10)
+    // Only the bare glyph drops it. The circle keeps the pill's chip tint on
+    // top of the pill's fill, so the magnifier sits on exactly the grey the
+    // pill shows -- the two are the same construction, not two tuned values
+    // that have to be kept in step by hand.
+    if (root.toolbarDesign === "icon") return "transparent"
+    if (root.hot) return Util.alpha(root.accentColor, 0.30)
+    // One value for every style that has a label, including the borderless
+    // ones: same grey as the pill's own chip. Substituting a surface colour
+    // here to compensate for the missing pill fill behind it made the chip
+    // lighter than the control it is supposed to match.
+    return Util.alpha(root.foregroundColor, 0.10)
   }
 
   // ------------------------------------------------------------------- panel
@@ -201,8 +260,14 @@ BarWidget {
     // Icon-only style is a compact square pill holding just the magnifier.
     // Height tracks the bar's own slot size rather than a baked-in 26, so the
     // button fills its slot exactly like every shell bar widget does.
-    width: root.bareIcon ? 26 : rootLabel.implicitWidth + 22
-    height: root.barSize
+    // "circle" is sized to the magnifier's own canvas, not the bar's slot.
+    // Filling the slot (26px) made the disc both oversized next to the pill's
+    // 16px chip and tall enough that its lower edge met the bottom of the
+    // toolbar, where the join against the bar edge was plainly visible.
+    // Equal sides, or it would be an oval rather than a circle.
+    width: root.toolbarDesign === "circle" ? root.circleSize
+         : (root.bareIcon ? root.circleSize : rootLabel.implicitWidth + 22)
+    height: root.toolbarDesign === "circle" ? root.circleSize : root.barSize
     anchors.verticalCenter: parent.verticalCenter
 
     // Let the bar's tooltip system treat this pill as a hoverable target.
@@ -256,9 +321,12 @@ BarWidget {
         anchors.rightMargin: -1
         anchors.topMargin: 0
         visible: root.updateBadge !== ""
-        width: badgeText.implicitWidth + 8
-        height: 12
-        radius: 6
+        // Scaled down on the compact styles. At the pill's size a 12px badge
+        // on a 20px circle covers the magnifier it is reporting on.
+        readonly property bool compact: root.bareIcon
+        width: badgeText.implicitWidth + (compact ? 5 : 8)
+        height: compact ? 9 : 12
+        radius: height / 2
         color: root.accentColor
         border.width: 1
         border.color: root.surfaceAlt
@@ -269,7 +337,7 @@ BarWidget {
           text: root.updateBadge
           color: root.surfaceAlt
           font.family: Style.font.resolvedFamily
-          font.pixelSize: Style.font.caption - 2
+          font.pixelSize: Style.font.caption - (updateBadgeRect.compact ? 4 : 2)
           font.bold: true
         }
       }
@@ -315,7 +383,7 @@ BarWidget {
         }
 
         Text {
-          text: root.buttonLabel
+          text: root.labelText
           visible: !root.bareIcon
           color: root.hot ? root.accentColor : Util.alpha(root.foregroundColor, 0.85)
           font.family: Style.font.resolvedFamily

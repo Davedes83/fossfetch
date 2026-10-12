@@ -36,6 +36,7 @@ FLATHUB = os.path.join(PLUGIN, "flathub_groups.py")
 FLATPAK_ICON = os.path.join(PLUGIN, "flatpak_icon.py")
 AUR = os.path.join(PLUGIN, "aur_search.py")
 PANEL = os.path.join(PLUGIN, "Panel.qml")
+BARWIDGET = os.path.join(PLUGIN, "BarWidget.qml")
 PINS = os.path.join(PLUGIN, "appstream_pins.sh")
 BACKEND_PACMAN = os.path.join(PLUGIN, "backend_pacman.sh")
 BACKEND_FLATPAK = os.path.join(PLUGIN, "backend_flatpak.sh")
@@ -900,7 +901,7 @@ class FossFetchTests(unittest.TestCase):
                          "iconFont is a different token and shifts the glyph")
         self.assertNotIn("height: 26", code,
                          "the button must track the bar's slot size, not a literal")
-        self.assertIn("height: root.barSize", code)
+        self.assertIn("root.barSize", code)
 
         # The bar host sizes each slot from the widget root's implicitHeight
         # (Bar.qml), so the root must forward the button's size. It already did;
@@ -1862,6 +1863,187 @@ class FossFetchTests(unittest.TestCase):
         body = src[src.index("function terminalArgv"):]
         body = body[:body.index("\n  }")]
         self.assertEqual(body.count('\"kitty\"'), 1)
+
+    def test_details_sheet_is_f2_only(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # F2 only. SUPER+CTRL+SHIFT+F also toggles this panel as a Hyprland
+        # binding, and Hyprland consumes a bound combo before the focused
+        # client sees it -- so binding it here too would be dead code that
+        # still looked like a working shortcut, and pressing it inside the
+        # panel would toggle the panel shut instead of opening anything.
+        self.assertIn("event.key === Qt.Key_F2", src)
+        self.assertIn("root.openDetailsCursor()", src)
+        self.assertNotIn("detailsModifierMask", src)
+
+    def test_hover_preview_is_gone(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # A hover popup was tried and removed: it had nowhere to go in a
+        # three-row panel without covering the card it described, and Ctrl+I
+        # reaches the same information on demand.
+        for gone in ("hoverPreview", "previewFacts", "noteHover",
+                     "hoverOpenTimer", "onHoveredChanged"):
+            self.assertNotIn(gone, src, "%s should no longer exist" % gone)
+
+    def test_toolbar_is_icon_only_on_a_first_install(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            panel = fh.read()
+        with open(BARWIDGET, encoding="utf-8") as fh:
+            bar = fh.read()
+        # Icon-only is the FIRST-INSTALL default, and the two cases are kept
+        # apart deliberately: a fresh install has nobody's bar to restyle,
+        # while an existing user whose file has no stored choice is on whatever
+        # they have been looking at and must not be switched under them.
+        self.assertIn('property string panelDesign: "icon"', panel)
+        self.assertIn('property string toolbarDesign: "icon"', bar)
+        # No settings file -> early return, declared default stands.
+        self.assertIn('String(raw).trim() === ""', panel)
+        self.assertIn('String(raw).trim() === ""', bar)
+        # File present but no usable design -> the historical "pill".
+        self.assertIn('return root.designs.indexOf(d) !== -1 ? d : "pill"', bar)
+        # Neither may write an options file just because it loaded.
+        self.assertNotIn("persistOptions()\n        if (raw", panel)
+
+    def test_support_prompt_rearms_once_per_release(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Re-armed on every update, untickable until the next one. A stored
+        # epoch from an older release -- or none at all, which is every
+        # existing install -- means an update happened, so the box comes back.
+        self.assertIn("storedEpoch !== root.supportPromptEpoch", src)
+        self.assertIn("supportEpoch: root.supportPromptEpoch", src)
+        # The epoch is written back immediately, or the stored value would
+        # still be stale next launch and the untick could never stick.
+        arm = src[src.index("if (storedEpoch !== root.supportPromptEpoch)"):]
+        arm = arm[:arm.index("} else if")]
+        self.assertIn("root.persistOptions()", arm)
+        # Still a plain checkbox: no modal, nothing the user cannot dismiss.
+        self.assertIn("property bool showCoffeeButton: true", src)
+
+    def test_five_toolbar_styles_are_offered_and_distinct(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            panel = fh.read()
+        with open(BARWIDGET, encoding="utf-8") as fh:
+            bar = fh.read()
+        expected = '"pill", "icon", "circle", "text", "brand"'
+        # Both files validate the stored value against the same list, so a
+        # value one of them does not know about is normalised, not rendered
+        # half-styled.
+        self.assertIn(expected, bar)
+        self.assertIn(expected, panel)
+        # Only the bare glyph drops the magnifier's grey circle; the label
+        # styles keep it, which is what makes them read as the pill's own
+        # control rather than loose text.
+        self.assertIn('root.toolbarDesign === "icon" || root.toolbarDesign === "circle"',
+                      bar)
+        # "brand" is the one style that does not follow the user's buttonLabel:
+        # saying what the thing is called is the entire point of it.
+        self.assertIn('root.toolbarDesign === "brand" ? "FossFetch" : root.buttonLabel', bar)
+
+    def test_circle_style_is_a_real_circle(self):
+        with open(BARWIDGET, encoding="utf-8") as fh:
+            bar = fh.read()
+        # Equal sides. A baked-in width next to the bar's own slot height
+        # squashes the circle into an oval at other font scales.
+        # Sized from the SHELL's own bar icon slot, which is what every other
+        # circular button in the bar is sized from. Deriving it from the icon
+        # canvas instead gave a disc a pixel or two off the icons it sits
+        # beside, which reads as a different control in the same bar.
+        self.assertIn('root.toolbarDesign === "circle" ? root.circleSize', bar)
+        self.assertIn("readonly property int circleSize: Style.bar.iconSlot", bar)
+        # The bare glyph uses the same box, so switching between the two
+        # compact styles does not resize the button.
+        self.assertIn("(root.bareIcon ? root.circleSize :", bar)
+        # No optical nudge: the shell centres its own buttons, and a manual
+        # offset only re-introduces the misalignment it was meant to fix.
+        self.assertNotIn("anchors.verticalCenterOffset", bar)
+        # It keeps the pill's edge off, so it is not just the pill again...
+        self.assertIn('if (root.toolbarDesign === "circle") return 0', bar)
+        # ...but its fill and the chip tint are NOT restated as separate
+        # branches: they fall through to the pill's own, so the magnifier sits
+        # on the same grey by construction rather than by two values kept in
+        # step by hand.
+        fill = bar[bar.index("function btnFillTop()"):bar.index("function chipFill()")]
+        self.assertNotIn('root.toolbarDesign === "circle"', fill)
+        self.assertIn('root.toolbarDesign === "icon") return "transparent"', bar)
+
+    def test_switching_tab_retires_an_in_flight_search(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # rebuildResults() repopulates the Updates tab from the scan's own
+        # rows, but a search launched a moment earlier was still running, and
+        # its handler only compares its own sequence against searchSeq. With
+        # the sequence unchanged the late rows passed the check and were
+        # appended to the Updates list -- so searching "firefox" left Datcord
+        # and Deckr sitting in Updates beside the one real update.
+        switch = src[src.index("function switchTab(t) {"):]
+        switch = switch[:switch.index("\n  }")]
+        self.assertIn("searchSeq++", switch)
+        # Belt and braces, so the tab is safe even if a caller forgets.
+        for fn in ("onPacmanResults", "onFlatpakResults", "onAurResults"):
+            body = src[src.index("function %s(text) {" % fn):]
+            body = body[:body.index("\n  }")]
+            self.assertIn("if (root.isUpdates) return", body)
+
+    def test_hotkey_installer_is_idempotent_and_never_rewrites(self):
+        script = os.path.join(PLUGIN, "install_hotkey.sh")
+        import tempfile, shutil
+        with open(script, encoding="utf-8") as fh:
+            src = fh.read()
+        # Appends only. A user's hyprland.lua is theirs; rewriting one to make
+        # room for a plugin's line is not a default, it is a data loss.
+        self.assertNotIn("> \"$FILE\"\n", src.replace(">>", "\n>>"))
+        self.assertIn(">> \"$FILE\"", src)
+        # Checks the whole config dir, so a binding the user already wrote by
+        # hand is never duplicated.
+        self.assertIn('grep -rqs "omarchy-shell fossfetch toggle" "$DIR"', src)
+
+        # Behaviour, against a real temp config dir.
+        d = tempfile.mkdtemp()
+        try:
+            hypr = os.path.join(d, "hypr")
+            os.makedirs(hypr)
+            cfg = os.path.join(hypr, "hyprland.lua")
+            with open(cfg, "w", encoding="utf-8") as fh:
+                fh.write('require("hypr.bindings")\n')
+
+            def run():
+                import subprocess
+                return subprocess.run(["sh", script, hypr, "SUPER + CTRL + SHIFT + F"],
+                                      capture_output=True, text=True).stdout.strip()
+
+            self.assertIn("installed", run())
+            with open(cfg, encoding="utf-8") as fh:
+                first = fh.read()
+            # The user's own content survives.
+            self.assertIn('require("hypr.bindings")', first)
+            # A second run adds nothing.
+            self.assertIn("already", run())
+            with open(cfg, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), first, "the installer must be idempotent")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_hotkey_installer_defuses_itself_without_a_config(self):
+        script = os.path.join(PLUGIN, "install_hotkey.sh")
+        import tempfile, shutil, subprocess
+        # No directory, no file, and a DIRECTORY named hyprland.lua: all three
+        # must be reported and left alone rather than created or followed.
+        for setup in (lambda p: None,
+                      lambda p: open(os.path.join(p, "hyprland.lua"), "w").close(),
+                      lambda p: os.makedirs(os.path.join(p, "hyprland.lua"))):
+            d = tempfile.mkdtemp()
+            try:
+                hypr = os.path.join(d, "hypr")
+                os.makedirs(hypr)
+                setup(hypr)
+                out = subprocess.run(["sh", script, hypr, "SUPER + CTRL + SHIFT + F"],
+                                     capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0)
+                self.assertIn("STATUS|", out.stdout)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
 
     def test_selection_is_keyed_not_indexed(self):
         with open(PANEL, encoding="utf-8") as fh:
