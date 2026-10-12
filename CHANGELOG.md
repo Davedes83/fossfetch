@@ -57,7 +57,33 @@ already out of date, which is the other half of what a package manager is for.
 - **Version comparison in the details sheet** — Installed and Available side by
   side whenever they differ.
 
+### Added
+
+- **Multi-select and batch actions.** `Space` marks the highlighted row and
+  steps down, `Shift`+`↑↓` extends a range, `Ctrl+A` takes everything, and
+  `Esc` puts the marks down again. A bar appears while anything is marked,
+  offering only the actions the selection can actually take — "Install
+  selected" is not offered when every marked package is already installed —
+  and `Enter` acts on the marks rather than on whatever the cursor happens to
+  sit on, using the same precedence as a single row: an available update first,
+  otherwise removal when everything marked is already installed.
+
+  A batch runs **one command per source, not one per package**. `actionProc` is
+  a single process and pacman holds a global database lock for the whole of an
+  install, so a terminal per package would either deadlock on that lock or open
+  a dozen windows, each independently re-resolving the same dependency set.
+  Removal stays non-cascading for every source, exactly as the single-row
+  button is, and still asks for confirmation first; install and update keep the
+  arm-then-run second click.
+
 ### Fixed
+
+- **The search box sometimes needed two opens before it took a character.**
+  `controller.show()` flips the panel's `opened` flag, and a panel that is not
+  yet visible has no focusable window — so the immediate `forceActiveFocus()`
+  after it was silently dropped, the panel appeared, and every keystroke went to
+  whatever was behind it. Both open paths now defer the focus request until the
+  panel is actually up, retrying while it is not.
 
 - **A failed update scan reported itself as "no updates".** `checkupdates`
   copies the sync databases to a temp dir before comparing, so it fails outright

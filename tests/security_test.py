@@ -1759,6 +1759,84 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("Qt.Key_Backtab", src)
 
 
+    def test_batch_installs_one_command_per_source_not_one_per_package(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # A batch that launched a terminal per package would either deadlock on
+        # pacman's global database lock or open a dozen windows, so the
+        # argument list has to be built per SOURCE and run through one Process.
+        self.assertIn("function batchCommand", src)
+        self.assertIn('["sudo", "pacman", "-S", "--needed"].concat(pkgs)', src)
+        self.assertIn('["flatpak", "install", "--assumeyes", "flathub"].concat(pkgs)', src)
+        # The chain keys off an explicit in-flight flag: a single-group batch
+        # empties its queue on the first pop, so keying off queue length would
+        # stop that batch dead and report it finished before it finished.
+        self.assertIn("property bool batchActive: false", src)
+        self.assertIn("root.batchActive = false", src)
+
+    def test_batch_removal_stays_non_cascading(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # The single-row path refuses -s for good reasons (dependencies are
+        # usually wanted by other installed software). A batch that quietly
+        # added it would undo that decision at ten times the blast radius.
+        start = src.index("function batchCommand")
+        end = src.index("// Start a batch", start)
+        body = src[start:end]
+        self.assertIn('["sudo", "pacman", "-R"].concat(pkgs)', body)
+        self.assertIn('["yay", "-R"].concat(pkgs)', body)
+        self.assertNotIn('"-Rs"', body)
+        self.assertNotIn('"--recursive"', body)
+        self.assertNotIn('"-s"', body.split('// Removal stays non-cascading')[1])
+
+    def test_batch_deduplicates_the_same_package_across_sources(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # A package offered by both a repo and the AUR is one install; handing
+        # the installer the same id twice is a re-install at best.
+        self.assertIn("if (byKey[key].pkgs.indexOf(pkg) < 0)", src)
+
+    def test_batch_modes_are_counted_in_packages_not_groups(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # batchGroups() returns one entry PER SOURCE, so five pacman packages
+        # is a length-1 array. Comparing that against a row count silently made
+        # "every selected package is installed" unreachable, and Enter reported
+        # there was nothing to install while sitting on two installed packages.
+        self.assertIn("function batchPkgCount", src)
+        self.assertIn('root.batchPkgCount("remove") === root.selectedCount', src)
+
+    def test_focus_is_deferred_until_the_panel_is_actually_shown(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # controller.show() flips `opened`, and a panel that is not yet visible
+        # has no focusable window, so an immediate forceActiveFocus() is
+        # dropped and every keystroke goes to whatever is behind the panel --
+        # which is why the search box sometimes needed two opens.
+        self.assertIn("function focusWhenShown", src)
+        start = src.index("function focusWhenShown")
+        # Slice to the next TOP-LEVEL definition. Cutting at the next bare
+        # "function" would stop inside the callLater callback and miss the
+        # retry entirely -- which is the assertion's whole point.
+        end = src.index("function ensureFreshScan", start)
+        body = src[start:end]
+        self.assertIn("if (root.opened)", body)
+        # Retried, not just deferred once: the transition is not guaranteed to
+        # have landed by the first event-loop turn either.
+        self.assertIn("Qt.callLater(root.focusWhenShown)", body)
+        self.assertNotIn("refreshFocus()\n    root.ensureFreshScan()", src)
+
+    def test_selection_is_keyed_not_indexed(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Indexes renumber on every sort, filter and rebuild, so a selection
+        # held as indexes silently drifts onto whatever lands there next.
+        self.assertIn("root.selectedKeys[root.rowKey(r)]", src)
+        # And rows dropped by a rebuild must leave the selection with it.
+        self.assertIn("function pruneSelection", src)
+        self.assertIn("root.pruneSelection()", src)
+
+
 def json_dumps(obj):
     import json
     return json.dumps(obj)

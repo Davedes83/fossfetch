@@ -266,6 +266,277 @@ Panel {
     root.persistOptions()
   }
 
+  // ------------------------------------------------------- multi-selection
+
+  // Selected rows, keyed by rowKey so the selection survives a re-sort, a
+  // filter, or the results arriving from another backend -- all of which
+  // renumber every index. An object used as a set rather than an array of
+  // indexes, because the indexes are the one thing that changes underneath it.
+  property var selectedKeys: ({})
+  // Where a Shift-range started. Kept as a key for the same reason; losing it
+  // on a rebuild would silently restart the range somewhere else.
+  property string selectionAnchor: ""
+
+  readonly property int selectedCount: Object.keys(root.selectedKeys).length
+
+  function isSelected(r) {
+    if (!r) return false
+    return root.selectedKeys[root.rowKey(r)] === true
+  }
+
+  // The delegate asks by index rather than carrying its own copy of the key.
+  // The key is built from _pkg, which cannot be declared as a QML property
+  // (leading underscore is reserved), so a delegate could only ever rebuild
+  // an approximation of it -- and a key that silently differs from the one the
+  // model uses marks the wrong row.
+  function isSelectedRowAt(i) {
+    if (root.selectedCount === 0) return false
+    var r = filteredModel.get(i)
+    return r ? root.isSelected(r) : false
+  }
+
+  // ------------------------------------------------------- batch execution
+
+  // One command per SOURCE, not one per package.
+  //
+  // `actionProc` is a single Process and pacman holds a global database lock
+  // for the whole of an install. Launching a terminal per selected package
+  // would either deadlock on that lock or open a dozen windows for a dozen
+  // packages, and each would independently re-resolve the shared dependency
+  // set. Grouping by source lets pacman resolve the whole set once.
+  //
+  // What comes back is one group per (mode, kind): the pacman installs in one
+  // list, the AUR ones in another, flatpak's separately, because each needs a
+  // different command.
+  function batchGroups(mode) {
+    var rows = root.selectedRows()
+    var byKey = {}
+    var order = []
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i]
+      var kind = null, pkg = ""
+      if (mode === "update") {
+        var u = root.pendingUpdate(row)
+        if (u) { kind = u.kind; pkg = u.pkg }
+      } else {
+        var spec = root.cardInstallSpec(row)
+        // A batch "install" must not install something that is already there
+        // and turn into a re-install; that is the card's own decision, and it
+        // says remove. Skipping keeps Enter's meaning honest.
+        if (spec && ((mode === "install" && spec.mode === "install")
+          || (mode === "remove" && spec.mode === "remove"))) {
+          kind = spec.kind
+          pkg = spec.pkg
+        }
+      }
+      if (!kind || !pkg) continue
+      var key = mode + ":" + kind
+      if (!byKey[key]) {
+        byKey[key] = { mode: mode, kind: kind, pkgs: [], names: [] }
+        order.push(byKey[key])
+      }
+      if (byKey[key].pkgs.indexOf(pkg) < 0) {
+        byKey[key].pkgs.push(pkg)
+        byKey[key].names.push(row.name || pkg)
+      }
+    }
+    // Deduplicated by package id: the same package offered by both a repo and
+    // the AUR must not be handed to the installer twice.
+    return order.filter(function (g) { return g.pkgs.length > 0 })
+  }
+
+  property var batchQueue: []
+  // True from the moment a batch is confirmed until its LAST group exits --
+  // NOT "is the queue non-empty". A batch with a single group empties the queue
+  // the instant it starts, and keying the chain off queue length would stop
+  // that batch dead: the exit would find nothing left and report the whole
+  // thing finished before it had finished.
+  property bool batchActive: false
+  readonly property bool batchRunning: root.batchActive
+
+  // Armed but not yet running: the confirmation (or the arm-then-run second
+// click) is still outstanding. Distinct from batchRunning, because "Working…"
+// over a batch that has not launched anything is simply untrue.
+readonly property bool batchArmed: root.pendingAction !== null && root.batchQueue.length > 0
+
+  // Runs the next queued group, or reports the whole batch finished.
+  function runNextBatchGroup() {
+    if (root.batchQueue.length === 0) {
+      root.batchActive = false
+      root.clearSelection()
+      root.refreshInstalled(true)
+      root.updatesAt = 0
+      root.refreshUpdates()
+      root.notify("FossFetch", "Batch finished. See the terminals for the results.")
+      return
+    }
+    var g = root.batchQueue[0]
+    root.batchQueue = root.batchQueue.slice(1)
+    // Only now is a batch actually running. Setting this at ARM time made
+    // "Working…" appear over a batch that had launched nothing yet, and
+    // hid the very buttons needed to confirm or cancel it.
+    root.batchActive = true
+    root.lastActionLabel = g.names.length === 1
+      ? g.names[0] : (g.names.length + " packages")
+    root.lastActionKind = g.kind
+    root.lastActionVerb = g.mode
+    var term = Quickshell.env("TERMINAL")
+    if (!term) term = Quickshell.env("TERMINAL_CMD")
+    if (!term) term = "kitty"
+    root.actionProc.command = [term, "-e"].concat(root.batchCommand(g))
+    root.actionProc.running = true
+    root.installFinishedTimer.restart()
+  }
+
+  // The literal argument list for one group. Kept separate from the launch so
+  // the command can be asserted directly in tests instead of inferred from a
+  // terminal window that has already closed.
+  function batchCommand(g) {
+    var pkgs = g.pkgs
+    if (g.mode === "install") {
+      if (g.kind === "pacman") return ["sudo", "pacman", "-S", "--needed"].concat(pkgs)
+      if (g.kind === "yay") return ["yay", "-S", "--needed"].concat(pkgs)
+      if (g.kind === "paru") return ["paru", "-S", "--needed"].concat(pkgs)
+      return ["flatpak", "install", "--assumeyes", "flathub"].concat(pkgs)
+    }
+    if (g.mode === "update") {
+      if (g.kind === "pacman") return ["sudo", "pacman", "-S", "-y"].concat(pkgs)
+      if (g.kind === "yay") return ["yay", "-S"].concat(pkgs)
+      if (g.kind === "paru") return ["paru", "-S"].concat(pkgs)
+      return ["flatpak", "update", "-y"].concat(pkgs)
+    }
+    // Removal stays non-cascading for every source, exactly as the single-row
+    // path is: no -s, no --assumeyes for removal, so nothing the user did not
+    // name is taken away with it.
+    if (g.kind === "pacman") return ["sudo", "pacman", "-R"].concat(pkgs)
+    if (g.kind === "yay") return ["yay", "-R"].concat(pkgs)
+    if (g.kind === "paru") return ["paru", "-R"].concat(pkgs)
+    return ["flatpak", "uninstall"].concat(pkgs)
+  }
+
+  // How many PACKAGES a mode covers, as opposed to how many groups it produced.
+// batchGroups returns one entry per source, so a five-package pacman batch is
+// a length-1 array; comparing that against a row count is how "every selected
+// package is installed" silently became "never".
+function batchPkgCount(mode) {
+    var groups = root.batchGroups(mode)
+    var n = 0
+    for (var i = 0; i < groups.length; i++) n += groups[i].pkgs.length
+    return n
+  }
+
+  // Start a batch. Removal still goes through the confirmation path; install
+  // and update keep the same arm-then-run second click the single-row buttons
+  // use, so a batch is never more destructive than the action it stands for.
+  function startBatch(mode) {
+    if (root.selectedCount === 0 || !root.isLive) return
+    var groups = root.batchGroups(mode)
+    if (groups.length === 0) {
+      // The selection held nothing this mode applies to (all already
+      // installed, say). Say so rather than appearing to do nothing.
+      root.notify("FossFetch", "None of the selected packages can be " + mode + "d.")
+      return
+    }
+    var total = 0
+    for (var i = 0; i < groups.length; i++) total += groups[i].pkgs.length
+    if (mode === "remove") {
+      root.pendingAction = { mode: "remove", kind: groups[0].kind,
+                             pkg: total + " packages", name: total + " packages" }
+      root.batchQueue = groups
+      return
+    }
+    if (root.actionPending(mode, groups[0].kind, total + " packages")) {
+      root.pendingAction = null
+      root.batchQueue = groups
+      root.runNextBatchGroup()
+      return
+    }
+    root.pendingAction = { mode: mode, kind: groups[0].kind,
+                           pkg: total + " packages", name: total + " packages" }
+    root.batchQueue = groups
+    root.confirmResetTimer.restart()
+  }
+
+  // Rebuild the key set after a sort/filter/rebuild. Rows that are no longer on
+  // screen are dropped rather than carried: selecting something and then
+  // hiding it should not leave it queued for an action the user cannot see.
+  function pruneSelection() {
+    var live = {}
+    var kept = 0
+    for (var i = 0; i < filteredModel.count; i++) {
+      var r = filteredModel.get(i)
+      if (!r) continue
+      var k = root.rowKey(r)
+      if (root.selectedKeys[k] === true) { live[k] = true; kept++ }
+    }
+    root.selectedKeys = live
+    if (root.selectionAnchor !== "" && live[root.selectionAnchor] !== true)
+      root.selectionAnchor = ""
+    return kept
+  }
+
+  function clearSelection() {
+    if (root.selectedCount === 0) return
+    root.selectedKeys = ({})
+    root.selectionAnchor = ""
+  }
+
+  function toggleSelect(r) {
+    var k = root.rowKey(r)
+    var next = {}
+    for (var key in root.selectedKeys) next[key] = root.selectedKeys[key]
+    if (next[k] === true) delete next[k]
+    else next[k] = true
+    root.selectedKeys = next
+    root.selectionAnchor = k
+  }
+
+  // Shift+arrows extend a contiguous range from the anchor. Re-clicking after
+  // moving the cursor re-seeds the anchor, so the range never silently spans
+  // back to a row the user has long since scrolled past.
+  function selectRange(toRow) {
+    if (root.selectionAnchor === "") { toggleSelect(toRow); return }
+    var ai = -1, ti = -1
+    for (var i = 0; i < filteredModel.count; i++) {
+      var r = filteredModel.get(i)
+      if (!r) continue
+      var k = root.rowKey(r)
+      if (k === root.selectionAnchor) ai = i
+      if (k === root.rowKey(toRow)) ti = i
+    }
+    if (ai < 0) ai = ti
+    if (ti < 0 || ai < 0) return
+    var lo = Math.min(ai, ti), hi = Math.max(ai, ti)
+    var next = {}
+    for (var key in root.selectedKeys) next[key] = root.selectedKeys[key]
+    for (var j = lo; j <= hi; j++) {
+      var rr = filteredModel.get(j)
+      if (rr) next[root.rowKey(rr)] = true
+    }
+    root.selectedKeys = next
+  }
+
+  function selectAll() {
+    var next = {}
+    for (var i = 0; i < filteredModel.count; i++) {
+      var r = filteredModel.get(i)
+      if (r) next[root.rowKey(r)] = true
+    }
+    root.selectedKeys = next
+    if (root.selectionAnchor === "" && filteredModel.count > 0)
+      root.selectionAnchor = root.rowKey(filteredModel.get(0))
+  }
+
+  // Selected rows as a plain array, in the order they appear on screen.
+  function selectedRows() {
+    var out = []
+    for (var i = 0; i < filteredModel.count; i++) {
+      var r = filteredModel.get(i)
+      if (r && root.isSelected(r)) out.push(r)
+    }
+    return out
+  }
+
   // AUR helpers actually present on this machine, detected once at panel open.
   // Previously the default was hard-coded to `yay`, so a paru-only user got an
   // install button that opened a terminal running a command that does not
@@ -1082,6 +1353,10 @@ var upd = root.updateSpecFor(r)
     // Row positions changed, so every key -> index map has to be rebuilt or
     // later metadata writes land on whichever package now sits at the old index.
     root.reindexModel()
+    // Keys survive the rebuild, but rows that no longer survive it must not:
+    // a selection carried through a filter would queue actions on packages
+    // the user cannot see.
+    root.pruneSelection()
 
     if (resetView) {
       resultsList.currentIndex = after.length > 0 ? 0 : -1
@@ -2249,7 +2524,7 @@ var upd = root.updateSpecFor(r)
     repeat: false
     onTriggered: {
       var m = root.pendingAction ? root.pendingAction.mode : ""
-      if (m === "install" || m === "update") root.pendingAction = null
+      if (m === "install" || m === "update") { root.cancelPendingAction() }
     }
   }
 
@@ -2257,6 +2532,12 @@ var upd = root.updateSpecFor(r)
     var a = root.pendingAction
     if (!a) return ""
     var verb = a.mode === "remove" ? "Remove" : (a.mode === "update" ? "Update" : "Install")
+    var count = parseInt(String(a.pkg || ""), 10)
+    // A batch's `pkg` is the placeholder "N packages", not an id, so printing
+    // it the way a single package is printed would read "Remove 3 packages
+    // (3 packages)?" -- the same fact twice, in a dialog about something
+    // irreversible.
+    if (!isNaN(count) && /\s/.test(String(a.pkg))) return verb + " " + count + " packages?"
     return verb + " " + (a.name || a.pkg) + " (" + a.pkg + ")?"
   }
 
@@ -2264,6 +2545,11 @@ var upd = root.updateSpecFor(r)
     var a = root.pendingAction
     if (!a) return
     root.pendingAction = null
+    // A batch was armed with a human-readable "N packages" placeholder rather
+    // than a package id, so the single-action path below would hand the
+    // installer the literal string "3 packages". Anything with a queue behind
+    // it is the batch runner's instead.
+    if (root.batchQueue.length > 0) { root.runNextBatchGroup(); return }
     if (a.mode === "remove") root.runRemove(a.kind, a.pkg, a.name)
     else if (a.mode === "update") root.runUpdate(a.kind, a.pkg, a.name, a.from, a.to)
     else root.runInstall(a.kind, a.pkg, a.name)
@@ -2271,6 +2557,12 @@ var upd = root.updateSpecFor(r)
 
   function cancelPendingAction() {
     root.pendingAction = null
+    // Dropping the confirmation must drop the queue it was standing in front
+    // of, and the in-flight flag with it -- otherwise the next unrelated
+    // action's exit would find batchActive set and try to run a batch that
+    // was never confirmed.
+    root.batchQueue = []
+    root.batchActive = false
   }
 
   function actionPending(mode, kind, pkg) {
@@ -2442,6 +2734,11 @@ var upd = root.updateSpecFor(r)
     // terminal, not pacman, so the toast states the outcome neutrally and points
     // at the terminal rather than claiming success.
     onExited: {
+      // A batch runs its groups one after another through this same Process, so
+      // its exit is the cue for the next group rather than the end of the
+      // whole thing. Handled before the single-action toast, which would
+      // otherwise announce "finished" after the first of several.
+      if (root.batchRunning) { root.runNextBatchGroup(); return }
       var what = root.lastActionLabel
       if (what === "") return
       root.notify("FossFetch",
@@ -2457,10 +2754,23 @@ var upd = root.updateSpecFor(r)
   }
 
   // ------------------------------------------------------------- lifecycle
+  // Unwind one layer at a time, least destructive first: a batch that has been
+  // armed but not yet confirmed is the most recent and most expensive mistake
+  // available, so it goes before the selection that armed it.
+  function unwindOnce() {
+    if (root.pendingAction !== null && root.batchQueue.length > 0) {
+      root.cancelPendingAction()
+      return true
+    }
+    if (root.selectedCount > 0) { root.clearSelection(); return true }
+    if (detailsSheet.open) { root.closeDetails(); return true }
+    return false
+  }
+
   function open() {
     root.controller.show()
-    refreshFocus()
     root.ensureFreshScan()
+    root.focusWhenShown()
   }
 
   function openFromHotkey() {
@@ -2469,8 +2779,22 @@ var upd = root.updateSpecFor(r)
     // requested here too — otherwise the badge and the Updates tab stay empty
     // until the first periodic tick, however many times the panel is opened.
     root.ensureFreshScan()
+    root.focusWhenShown()
+  }
+
+  // Take focus only once the panel is actually up.
+  //
+  // controller.show() flips `opened`, and a panel that is not yet visible has
+  // no focusable window, so an immediate forceActiveFocus() is silently
+  // dropped: the panel appears, the field is not focused, and every keystroke
+  // goes to whatever was behind it. This is why the search box could need two
+  // opens before it took a character. Deferred to the next event-loop turn,
+  // and retried while `opened` is still false, because the transition is not
+  // guaranteed to have landed by the first one.
+  function focusWhenShown() {
     Qt.callLater(function() {
-      if (root.opened) refreshFocus()
+      if (root.opened) { root.refreshFocus(); return }
+      Qt.callLater(root.focusWhenShown)
     })
   }
 
@@ -2717,6 +3041,19 @@ var upd = root.updateSpecFor(r)
     // is a real search regardless of whether the settle window has elapsed.
     root.flushRecent()
     if (filteredModel.count === 0) return
+    // A live selection means Enter acts on what is MARKED, not on whatever the
+    // cursor happens to be sitting on. With several rows queued, acting on the
+    // highlighted one alone would be the least useful reading of the key.
+    if (root.selectedCount > 0) {
+      // Same precedence the single-row path below uses, applied to the whole
+      // selection: an available update outranks everything, and when every
+      // selected package is already installed and current the obvious thing is
+      // to remove them -- not to report that there is nothing to install.
+      if (root.batchGroups("update").length > 0) root.startBatch("update")
+      else if (root.batchPkgCount("remove") === root.selectedCount) root.startBatch("remove")
+      else root.startBatch("install")
+      return
+    }
     var idx = resultsList.currentIndex
     if (idx < 0 || idx >= filteredModel.count) return
     var row = filteredModel.get(idx)
@@ -2769,8 +3106,9 @@ var upd = root.updateSpecFor(r)
       // panel. Closing the whole panel with the sheet open would look like the
       // sheet swallowed the key.
       onCloseRequested: {
-        if (detailsSheet.open) root.closeDetails()
-        else root.close()
+        // Same one-layer-at-a-time unwind the Escape key uses, so losing
+        // focus closes the panel exactly the way pressing Escape would.
+        if (!root.unwindOnce()) root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
@@ -3208,11 +3546,12 @@ Icon {
                   }
                 }
                 if (event.key === Qt.Key_Escape) {
-                  // Unwind one layer at a time: the details sheet first, then the
-                  // panel. Closing the whole panel with the sheet open would look
-                  // like the sheet swallowed the key.
-                  if (detailsSheet.open) root.closeDetails()
-                  else root.close()
+                  // Unwind one layer at a time: a live selection, then the
+                  // details sheet, then the panel. Escape is the way out of
+                  // everything you can be in, so it clears the least
+                  // destructive thing first and only closes the panel once
+                  // there is nothing left to unwind.
+                  if (!root.unwindOnce()) root.close()
                   event.accepted = true
                 } else if (event.key === Qt.Key_Tab) {
                   root.switchPanel(1)
@@ -3221,10 +3560,45 @@ Icon {
                   root.switchPanel(-1)
                   event.accepted = true
                 } else if (event.key === Qt.Key_Down) {
-                  root.moveCursor(0, 1)
+                  // Shift extends the selection instead of just moving the
+                  // cursor, the same shape as every file manager.
+                  if (event.modifiers & Qt.ShiftModifier) {
+                    if (filteredModel.count > 0) {
+                      var ti = Math.min(resultsList.currentIndex + 1, filteredModel.count - 1)
+                      resultsList.currentIndex = ti
+                      root.selectRange(filteredModel.get(ti))
+                    }
+                  } else {
+                    root.moveCursor(0, 1)
+                  }
                   event.accepted = true
                 } else if (event.key === Qt.Key_Up) {
-                  root.moveCursor(0, -1)
+                  if (event.modifiers & Qt.ShiftModifier) {
+                    if (filteredModel.count > 0) {
+                      var tu = Math.max(resultsList.currentIndex - 1, 0)
+                      resultsList.currentIndex = tu
+                      root.selectRange(filteredModel.get(tu))
+                    }
+                  } else {
+                    root.moveCursor(0, -1)
+                  }
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Space) {
+                  // Toggle the highlighted row and step down, so a run of
+                  // packages can be marked without leaving the home row --
+                  // otherwise reaching the tenth row to select it is nine
+                  // extra presses of down-arrow.
+                  var ci = resultsList.currentIndex
+                  if (ci >= 0 && ci < filteredModel.count) {
+                    root.toggleSelect(filteredModel.get(ci))
+                    if (ci < filteredModel.count - 1) {
+                      resultsList.currentIndex = ci + 1
+                      root.selectionAnchor = ""
+                    }
+                  }
+                  event.accepted = true
+                } else if (event.key === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) {
+                  root.selectAll()
                   event.accepted = true
                 } else if (event.key === Qt.Key_F2) {
                   // Look before you commit. Enter installs; F2 opens the details
@@ -3310,6 +3684,72 @@ Icon {
           }
         }
 
+        // Batch action bar. Only exists while something is marked, so the
+        // panel does not spend a permanent row on controls that have nothing
+        // to act on -- and appearing the instant you press Space means the
+        // count and the buttons are already there when you look up to check
+        // what you marked.
+        Item {
+          id: batchBar
+          width: parent.width
+          implicitHeight: root.selectedCount > 0 ? Style.space(26) : 0
+          visible: root.selectedCount > 0
+
+          Behavior on implicitHeight {
+            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+          }
+
+          Text {
+            id: batchCount
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.selectedCount + " selected"
+            color: Util.alpha(Color.popups.text, 0.7)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+          }
+
+          Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.sm
+
+            // Install and Remove are offered only when the selection actually
+            // contains something they can act on. A bar whose buttons do
+            // nothing reads as a broken button, and the "none of the selected
+            // packages can be ..." notice that would otherwise explain it
+            // arrives one keystroke too late.
+            ActionPill {
+              label: "Install selected"
+              visible: root.batchGroups("install").length > 0 && !root.batchRunning
+              onClicked: root.startBatch("install")
+            }
+            ActionPill {
+              label: "Update selected"
+              visible: root.batchGroups("update").length > 0 && !root.batchRunning
+              onClicked: root.startBatch("update")
+            }
+            ActionPill {
+              label: "Remove selected"
+              // Removal stays the one action that always asks first, exactly
+              // as the single-row Remove button does.
+              visible: root.batchGroups("remove").length > 0 && !root.batchRunning
+              destructive: true
+              onClicked: root.startBatch("remove")
+            }
+            HelperPill {
+              label: "Clear"
+              onClicked: root.clearSelection()
+            }
+            HelperPill {
+              label: root.batchRunning ? "Working…"
+                : (root.batchArmed ? "Confirm to run" : "Space Select")
+              enabled: !root.batchRunning
+            }
+          }
+        }
+
         // ----------------------------------------------------------- results
         Item {
           width: parent.width
@@ -3335,6 +3775,12 @@ Icon {
 
             delegate: Rectangle {
               id: delegateRoot
+              // Declared, not left to the implicit delegate injection. The
+              // check state is resolved by index (see isSelectedRowAt), and an
+              // unresolved `index` there is a ReferenceError on every rebind --
+              // which surfaces as cards that quietly stop showing as checked
+              // rather than as an error anyone would notice.
+              required property int index
               required property string name
               required property string description
               required property string website
@@ -3383,8 +3829,17 @@ Icon {
               // delegate binding) but are deliberately not declared here: a
               // delegate only needs a role it actually draws.
 
-              // Selected / hover highlight — menu-style selected surface.
-              readonly property bool isSelected: ListView.isCurrentItem
+              // Cursor and selection are drawn as two different things rather
+              // than one: a checked row is filled and outlined (it is queued
+              // for a batch action), while the cursor row additionally carries
+              // a hairline ring (it is merely where the next keystroke lands).
+              // Overloading a single "selected" state would make the keyboard
+              // cursor invisible the moment anything was checked, and adding a
+              // checkbox column would slide every card sideways at the instant
+              // the user started marking them.
+              readonly property bool isCursor: ListView.isCurrentItem
+              readonly property bool isChecked: root.isSelectedRowAt(index)
+              readonly property bool isSelected: isCursor
               readonly property bool isHovered: cardHover.hovered
 
               // Background-only hover, beneath the interactive controls.
@@ -3398,11 +3853,15 @@ Icon {
               // Never let any child paint outside the card bounds, no matter
               // how long a name/description/button label gets.
               clip: true
-              color: isSelected
+              color: isChecked
                 ? Util.alpha(Color.accent, 0.14)
                 : (isHovered ? Util.alpha(Color.popups.text, 0.05) : "transparent")
-              border.width: isSelected ? Border.uniformWidth(root.selectedBorderSpec) : 0
-              border.color: isSelected ? Border.color(root.selectedBorderSpec) : "transparent"
+              border.width: isChecked
+                ? Border.uniformWidth(root.selectedBorderSpec)
+                : (isCursor ? 1 : 0)
+              border.color: isChecked
+                ? Border.color(root.selectedBorderSpec)
+                : (isCursor ? Util.alpha(Color.accent, 0.5) : "transparent")
 
               // Source rail: a 2px bar in the tab's own colour. Scannable
               // before a single word is read, and it costs the card two pixels
@@ -3875,11 +4334,12 @@ Icon {
           visible: resultsList.count > 0
 
           Hint { keys: "\u2191\u2193"; label: "Move" }
-          Hint { keys: "\u21b5"; label: root.isUpdates ? "Update" : "Install" }
+          Hint { keys: "\u2423"; label: root.selectedCount > 0 ? (root.selectedCount + " marked") : "Select" }
+          Hint { keys: "\u21b5"; label: root.selectedCount > 0 ? "Batch" : (root.isUpdates ? "Update" : "Install") }
           Hint { keys: "F2"; label: "Details" }
           Item { Layout.fillWidth: true }
           Hint { keys: "Tab"; label: "Source" }
-          Hint { keys: "Esc"; label: "Close" }
+          Hint { keys: "Esc"; label: root.selectedCount > 0 ? "Clear" : "Close" }
         }
       }
     }
@@ -4202,6 +4662,62 @@ Icon {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: pill.clicked()
+    }
+  }
+
+  // A pill that DOES something, so it is drawn filled rather than as a hint.
+  //
+  // Distinct from HelperPill on purpose: HelperPill is chrome you can read
+  // (a keybinding, the current sort), while these commit package operations.
+  // Removing a selection is marked destructive so it never reads as a peer of
+  // Install at a glance.
+  component ActionPill: Rectangle {
+    id: act
+    property string label: ""
+    property bool destructive: false
+    property bool selected: false
+    signal clicked()
+
+    implicitHeight: Style.space(24)
+    radius: Style.cornerRadius
+    // confirmColor, not a red: the shell's Color object has no error token, and
+    // this codebase already signals "this one is the dangerous control" with
+    // it on the single-row buttons and the confirm dialog. Matching them keeps
+    // one visual language for destruction instead of two.
+    readonly property color tone: act.destructive ? root.confirmColor : Color.accent
+    color: act.selected
+      ? Util.alpha(act.tone, 0.22)
+      : (actMouse.containsMouse ? Util.alpha(act.tone, 0.16) : Util.alpha(Color.popups.text, 0.07))
+    border.width: Style.space(1)
+    border.color: Util.alpha(act.tone, actMouse.containsMouse ? 0.55 : 0.3)
+
+    Text {
+      anchors.centerIn: parent
+      text: act.label
+      color: act.tone
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      textFormat: Text.PlainText
+    }
+
+    implicitWidth: Math.max(implicitHeight, contentText.implicitWidth + Style.space(16))
+
+    Text {
+      id: contentText
+      visible: false
+      text: act.label
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    MouseArea {
+      id: actMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: act.clicked()
     }
   }
 

@@ -168,6 +168,15 @@ All options persist to
   installed, `Esc` closes, `/` refocuses the search box. `←`/`→` are left alone
   so they edit the query like a normal text field. The bindings are listed in a
   footer under the results rather than left to be discovered in the source.
+- **Multi-select and batch actions**: `Space` marks the highlighted row and
+  steps down, `Shift`+`↑↓` extends a range, `Ctrl+A` marks everything, and
+  `Esc` puts the marks down. While anything is marked a bar appears offering
+  **Install selected** / **Update selected** / **Remove selected**, each shown
+  only when the selection contains something it can act on. `Enter` acts on the
+  marks rather than the cursor. One command runs per source — all the pacman
+  packages in a single `pacman -S`, the AUR ones together, Flatpak separately —
+  so a batch cannot deadlock on the pacman lock or open a window per package.
+  Removal stays non-cascading and still confirms first.
 - **Theme-aware**: per-ecosystem accents (green = Pacman, cyan = AUR,
   blue = Flatpak, yellow = confirm state) are read from the active theme's
   `colors.toml`, so the panel blends with whatever theme is running.
