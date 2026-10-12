@@ -94,6 +94,13 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **The details sheet opened in the top-left corner.** It anchored below its
+  anchor item, which is the toolbar button — and that button sits at the far
+  left of the bar. The sheet therefore appeared under a button, in the corner,
+  while the panel it describes was centred in the middle of the screen: the
+  same information in two places at once, one of them nowhere near the rows
+  F2 was pressed on. It now centres on the bar, like the panel.
+
 - **A first install did not get the toolbar it was supposed to.** "Icon" is now
   the default when there is no settings file at all. An install that already
   has one keeps its choice — and a file without a stored design falls back to

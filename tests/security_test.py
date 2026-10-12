@@ -2045,6 +2045,19 @@ class FossFetchTests(unittest.TestCase):
             finally:
                 shutil.rmtree(d, ignore_errors=True)
 
+    def test_details_sheet_is_centred_not_anchored_to_the_bar_button(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Without centerOnBar, PopupCard anchors BELOW its anchorItem -- and
+        # that item is the toolbar button, which sits at the far left of the
+        # bar. The sheet therefore opened in the top-left corner while the
+        # panel it describes was centred: the same information in two places,
+        # one of them nowhere near the rows F2 was pressed on.
+        sheet = src[src.index("id: detailsSheet"):]
+        sheet = sheet[:sheet.index("\n  }")]
+        self.assertIn("centerOnBar: true", sheet)
+        self.assertIn("anchorItem: panel.anchorItem", sheet)
+
     def test_selection_is_keyed_not_indexed(self):
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()

@@ -4537,6 +4537,15 @@ Icon {
     anchorItem: panel.anchorItem
     bar: root.bar
     owner: root.barIdentity
+    // Centred on the bar, like the panel it belongs to.
+    //
+    // Without this the card anchors BELOW its anchor item -- and that item is
+    // the toolbar button, which sits at the far left of the bar. The sheet
+    // therefore opened in the top-left corner, under a button, while the
+    // panel it describes was centred in the middle of the screen: the same
+    // information, in two places at once, one of them nowhere near the rows
+    // the user pressed F2 on.
+    centerOnBar: true
     triggerMode: "click"
     contentWidth: detailsSheet.fittedContentWidth(Style.space(440), Style.space(440))
     // Sized to its content, then capped: the card should not carry a large
