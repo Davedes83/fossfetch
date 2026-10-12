@@ -517,9 +517,25 @@ Panel {
     // is for.
     var upd = root.updateSpecFor(e)
     if (upd) chips.unshift({ label: "Update", value: root.updateLabel(upd) })
+    var pop = root.popularityChip(e)
+    if (pop) chips.push(pop)
     var when = root.fmtUpdated((e && e.updated) || "")
     if (when !== "") chips.push({ label: "Updated", value: when })
     return chips
+  }
+
+  // The AUR's Popularity is the fraction of AUR users running the package —
+  // the closest thing the RPC offers to "is this actually used?". It is only
+  // meaningful for AUR rows, and a package nobody installs reads better as an
+  // honest "0.0%" than as no chip at all.
+  function popularityChip(e) {
+    if (!e || e.aurPkg === "") return null
+    var raw = String(e.aurPopularity || "")
+    if (raw === "") return null
+    var pct = parseFloat(raw) * 100
+    if (isNaN(pct) || pct < 0) return null
+    return { label: "Popularity",
+             value: pct >= 1 ? pct.toFixed(1) + "%" : pct.toFixed(2) + "%" }
   }
 
   function detailPoints(e) {
@@ -920,7 +936,7 @@ var upd = root.updateSpecFor(r)
         thumbnail: "", iconName: "", downloadSize: "", installedSize: "",
         dependsOn: "", optionalDeps: "", requiredBy: "", conflictsWith: "",
         provides: "", groups: "", packager: "", branch: "", collection: "",
-        aurVotes: "", aurMaintainer: "", aurOutdated: "", _pkg: "",
+        aurVotes: "", aurMaintainer: "", aurOutdated: "", aurPopularity: "", _pkg: "",
         pacmanPkg: "", aurPkg: "", flatpakPkg: ""
       }
       if (kind === "pacman") row.pacmanPkg = name
@@ -1138,7 +1154,7 @@ var upd = root.updateSpecFor(r)
       name: "", description: "", rating: "", website: "", license: "",
       category: "", repo: "", version: "", arch: "", licenses: "", updated: "",
       thumbnail: "", iconName: "", pacmanPkg: "", aurPkg: "", flatpakPkg: "", _pkg: "",
-      aurVotes: "", aurMaintainer: "", aurOutdated: "", downloadSize: "",
+      aurVotes: "", aurMaintainer: "", aurOutdated: "", aurPopularity: "", downloadSize: "",
       installedSize: "", dependsOn: "", optionalDeps: "", requiredBy: "",
       conflictsWith: "", provides: "", groups: "", packager: "",
       branch: "", collection: ""
@@ -1363,7 +1379,8 @@ var upd = root.updateSpecFor(r)
         votes: parts[6] !== undefined ? parts[6].trim() : "",
         lastModified: parts[7] !== undefined ? parts[7].trim() : "",
         maintainer: parts[8] !== undefined ? parts[8].trim() : "",
-        outOfDate: parts[9] !== undefined ? parts[9].trim() : ""
+        outOfDate: parts[9] !== undefined ? parts[9].trim() : "",
+        popularity: parts[10] !== undefined ? parts[10].trim() : ""
       })
     }
     parsed.sort(function(a, b) {
@@ -1388,7 +1405,8 @@ var upd = root.updateSpecFor(r)
         updated: info.lastModified,
         thumbnail: "", iconName: "", pacmanPkg: "", aurPkg: info.name, flatpakPkg: "",
         _pkg: info.name,
-        aurVotes: info.votes, aurMaintainer: info.maintainer, aurOutdated: info.outOfDate
+        aurVotes: info.votes, aurMaintainer: info.maintainer, aurOutdated: info.outOfDate,
+        aurPopularity: info.popularity
       })
       added++
     }
@@ -2897,6 +2915,7 @@ Icon {
               required property string aurVotes
               required property string aurMaintainer
               required property string aurOutdated
+              required property string aurPopularity
               // "Downloaded: 12.4 MiB" straight from `pacman -Si`.
               required property string downloadSize
               // Dependency graph + installed footprint for the details sheet.
@@ -3385,6 +3404,25 @@ Icon {
             }
           }
         }
+
+        // ------------------------------------------------------ keyboard hints
+        // A thin footer naming the keys the panel actually binds. The panel is
+        // keyboard-first - Enter installs, Tab cycles sources, F2 looks before
+        // committing - but nothing on screen said so, and the only way to
+        // discover F2 was to read the source. Deliberately the lowest-contrast
+        // element in the panel: it must inform without competing with results.
+        RowLayout {
+          width: parent.width
+          spacing: Style.spacing.lg
+          visible: resultsList.count > 0
+
+          Hint { keys: "\u2191\u2193"; label: "Move" }
+          Hint { keys: "\u21b5"; label: root.isUpdates ? "Update" : "Install" }
+          Hint { keys: "F2"; label: "Details" }
+          Item { Layout.fillWidth: true }
+          Hint { keys: "Tab"; label: "Source" }
+          Hint { keys: "Esc"; label: "Close" }
+        }
       }
     }
   }
@@ -3627,6 +3665,32 @@ Icon {
         textFormat: Text.PlainText
         anchors.bottom: parent.bottom
       }
+    }
+  }
+
+  // One key + its meaning, for the footer hint row. Declared at the root level
+  // alongside MetaChip/InstallButton rather than inside the row itself: an
+  // inline component declared inside a nested object silently fails to
+  // instantiate there, which took the whole panel down with it.
+  component Hint: RowLayout {
+    id: hint
+    property string keys: ""
+    property string label: ""
+    spacing: Style.spacing.xxs
+    Text {
+      text: hint.keys
+      color: Util.alpha(Color.popups.text, 0.6)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      textFormat: Text.PlainText
+    }
+    Text {
+      text: hint.label
+      color: Util.alpha(Color.popups.text, 0.4)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
     }
   }
 

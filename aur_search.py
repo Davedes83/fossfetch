@@ -209,6 +209,16 @@ def main():
         pkgbase = cleanup(p.get("PackageBase")) or name
         votes = str(p.get("NumVotes") or "")
         lastmod = str(p.get("LastModified") or "")
+        # Popularity is the AUR's own 0..1 "how many people have this
+        # installed" figure, maintained separately from votes. It answers a
+        # different question than NumVotes ("is this well-regarded?"), so both
+        # are carried. Emitted with a fixed 3-decimal precision so it never
+        # renders as a float's platform-dependent trailing digits.
+        pop = p.get("Popularity")
+        try:
+            popularity = "%.3f" % float(pop) if pop is not None else ""
+        except (TypeError, ValueError):
+            popularity = ""
         # Trust signals. The RPC returns null/0 for packages that are current;
         # anything non-zero in OutOfDate means the maintainer has flagged it as
         # out of date, which is the single most useful warning on an AUR card.
@@ -223,7 +233,7 @@ def main():
         # are fetched on demand by the `info` subcommand when the details sheet
         # is opened, rather than turning every keystroke into N extra requests.
         print("\t".join([name, desc, version, website, license_, pkgbase, votes,
-                         lastmod, maintainer, outofdate]))
+                         lastmod, maintainer, outofdate, popularity]))
         count += 1
     print("STATUS|ok|%d" % count)
 
