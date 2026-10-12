@@ -4,6 +4,54 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — unreleased
+
+FossFetch could find and install packages. It could not tell you what was
+already out of date, which is the other half of what a package manager is for.
+
+### Added
+
+- **An Updates tab, shown only when there is something in it.** A background
+  scan (`checkupdates`, `yay`/`paru -Qua`, `flatpak remote-ls --updates`) runs
+  once at startup, every five minutes, and after any install, update or removal.
+  The tab appears between Flatpak and All, and disappears the moment the last
+  pending update is gone — an empty Updates tab teaches people to ignore it.
+- **A count badge on the toolbar icon**, so the number is visible without
+  opening the panel at all. It is drawn as an overlay rather than a third item
+  in the button, so the pill does not resize and twitch as updates are applied.
+- **Update availability on every card.** An installed package whose version
+  has moved on gets an `Update` chip stating both versions (`2.10.38-4 →
+  2.10.38-5`) and its own amber Update button. Update and Remove are separate
+  controls: one button that means "install" or "update" or "remove" depending
+  on hidden state is the ambiguity the card redesign removed, and a
+  mis-click here uninstalls something.
+- **`F2` opens the details sheet** for the highlighted row. It was mouse-only,
+  so a keyboard-first panel had no way to look at a package before committing to
+  it. Enter still installs; F2 is the "look first" key.
+- **Version comparison in the details sheet** — Installed and Available side by
+  side whenever they differ.
+
+### Fixed
+
+- **The installed-package snapshot lost its versions.** It read names only
+  (`pacman -Qq`), so there was nothing to compare an offered version against
+  and no update could ever be detected honestly. It now reads `pacman -Q` and
+  flatpak's version column — still one subprocess for both.
+
+### Changed
+
+- **Enter now prefers an update.** On a row with a pending update it drives the
+  Update button rather than removal, which is what the row is inviting.
+
+### Notes
+
+- Version comparison follows pacman's scheme (epochs, pkgrel, numeric segment
+  ordering) and is deliberately conservative: an unparseable or missing
+  version never produces an update. A missed prompt is recoverable; telling
+  someone to update something already current is not.
+- The Updates tab hides Install and Remove. The tab exists to update things,
+  and offering Remove beside Update invites a mis-click.
+
 ## [1.1.1] — unreleased
 
 A visual pass over the whole panel. Nothing about what FossFetch does changed;

@@ -237,6 +237,90 @@ function matchReasonFor(name, query, inGroup) {
     return "Matched through this package's metadata";
 }
 
+// ------------------------------------------------------- version comparison
+//
+// Decides whether the version on offer is genuinely newer than what is
+// installed, so a card can offer "Update" honestly. pacman's version scheme is
+// not a plain string order, so the comparison is done segment-by-segment the
+// way vercmp does it, but simplified to the cases that actually appear in a
+// package manager card:
+//
+//   [epoch:]version[-pkgrel]
+//
+//   * an "epoch:" prefix (rare, but pacman honours it) is compared as a number
+//     and overrides everything after it;
+//   * the pkgrel (after the last '-') is compared last;
+//   * within a segment, runs of digits compare numerically and runs of letters
+//     compare lexically (a rule of thumb that matches rpm/pacman for the
+//     letter/digit boundaries we see here).
+//
+// Deliberately conservative: when the two versions cannot be parsed confidently
+// it returns 0 ("no meaningful difference"), so an update is never *offered*
+// on the strength of a guess. A missed update prompt is recoverable; telling
+// someone to update a package that is already current is not.
+function splitVersion(v) {
+    var s = String(v === undefined || v === null ? "" : v).trim();
+    if (s === "") return null;
+    var epoch = 0;
+    var colon = s.indexOf(":");
+    if (colon !== -1) {
+        var e = s.substring(0, colon);
+        if (/^\d+$/.test(e)) { epoch = parseInt(e, 10); s = s.substring(colon + 1); }
+    }
+    var release = null;
+    var dash = s.lastIndexOf("-");
+    if (dash !== -1) { release = s.substring(dash + 1); s = s.substring(0, dash); }
+    return { epoch: epoch, version: s, release: release === null ? "" : release };
+}
+
+function cmpSegment(a, b) {
+    // Walk both segments, comparing digit-runs numerically and letter-runs
+    // lexically, exactly the way vercmp classifies each character.
+    var re = /(\d+|[A-Za-z]+)/g;
+    var ta = a.match(re) || [];
+    var tb = b.match(re) || [];
+    var n = Math.max(ta.length, tb.length);
+    for (var i = 0; i < n; i++) {
+        var x = ta[i], y = tb[i];
+        if (x === undefined) return -1;
+        if (y === undefined) return 1;
+        var xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
+        if (xn && yn) {
+            var dx = parseInt(x, 10), dy = parseInt(y, 10);
+            if (dx !== dy) return dx < dy ? -1 : 1;
+        } else if (xn !== yn) {
+            // A numeric run outranks an alphabetic one at the same position.
+            return xn ? 1 : -1;
+        } else {
+            if (x !== y) return x < y ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+// Returns 1 if `avail` is strictly newer than `inst`, -1 if older, 0 if equal
+// or not confidently comparable.
+function compareVersions(avail, inst) {
+    var a = splitVersion(avail), b = splitVersion(inst);
+    if (!a || !b) return 0;
+    if (a.epoch !== b.epoch) return a.epoch < b.epoch ? -1 : 1;
+    var c = cmpSegment(a.version, b.version);
+    if (c !== 0) return c;
+    if (a.release === "" || b.release === "") return 0;
+    return cmpSegment(a.release, b.release);
+}
+
+// True only when the package is installed AND the offered version is strictly
+// newer. Identical or unparseable versions return false, so the card stays a
+// plain "Installed" pill rather than claiming an update that is not one.
+function needsUpdate(avail, inst) {
+    var installed = String(inst === undefined || inst === null ? "" : inst).trim();
+    var available = String(avail === undefined || avail === null ? "" : avail).trim();
+    if (installed === "" || available === "") return false;
+    if (installed === available) return false;
+    return compareVersions(available, installed) === 1;
+}
+
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         isSafeWebUrl: isSafeWebUrl,
@@ -250,6 +334,9 @@ if (typeof module !== "undefined" && module.exports) {
         trustLabel: trustLabel,
         isAurRow: isAurRow,
         depNames: depNames,
-        matchReasonFor: matchReasonFor
+        matchReasonFor: matchReasonFor,
+        splitVersion: splitVersion,
+        compareVersions: compareVersions,
+        needsUpdate: needsUpdate
     };
 }

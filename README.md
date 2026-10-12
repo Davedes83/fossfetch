@@ -73,10 +73,30 @@ snapshot marks every card that is on the machine: the button becomes an inert
 never a surprise. The snapshot is refreshed at most once a minute and again
 after an install is launched.
 
-### Six toolbar icon designs
+### Two toolbar icon designs
 The "Find App" pill in the bar restyles itself live. Choose from the options
-panel: **Current, Outline, Soft, Bold, Minimal, Icon** (a bare magnifying-glass
-glyph). The setting is pushed to the bar widget in real time and persists.
+panel: **Pill** (magnifier chip + label) or **Icon** (a bare magnifying-glass
+glyph). The setting is pushed to the bar widget in real time and persists. When
+updates are pending, the button also carries a count badge.
+
+### Updates
+The other half of a package manager: knowing what is already out of date.
+
+- A **background scan** checks `checkupdates` (repo packages), `yay`/`paru -Qua`
+  (the AUR) and `flatpak remote-ls --updates` (Flathub). It runs at startup,
+  every five minutes, and again after any install, update or removal.
+- An **Updates tab** appears next to Flatpak — **only while there is something
+  to show**. It vanishes the moment the last pending update is applied, so you
+  never open a tab that has nothing in it.
+- A **count badge** on the toolbar icon shows how many are pending without
+  opening the panel at all.
+- On any card, an installed package with a newer version available gets an
+  amber `Update` chip stating both versions (`2.10.38-4 → 2.10.38-5`) and its
+  own **Update** button. Update and Remove are deliberately separate controls.
+- Version comparison follows pacman's rules (epochs, pkgrel, numeric segment
+  ordering). An unparseable or missing version never triggers an update — a
+  missed prompt is recoverable, telling you to update something already current
+  is not.
 
 ### Install and remove
 An installed package keeps its `✓ Installed` chip and the button beside it
@@ -86,11 +106,12 @@ usually still needed by something else. Both actions open a confirmation dialog
 naming the exact package.
 
 ### Details sheet
-Each card has a **Details** button showing the dependency graph, installed and
-download size, provides/conflicts, and a plain-language explanation of *why*
-that result matched your query. For an installed package it also lists what
-requires it — the thing that tells you whether removing it would break
-something else.
+Each card has a **Details** button — or **F2** on the highlighted row —
+showing the dependency graph, installed and download size, provides/conflicts,
+and a plain-language explanation of *why* that result matched your query. For an
+installed package it also lists what requires it — the thing that tells you
+whether removing it would break something else. When the installed and available
+versions differ, both are shown side by side.
 
 ### Options panel (gear icon)
 - Toggle the **AUR** and **Flatpak** tabs on/off.

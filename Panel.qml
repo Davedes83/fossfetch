@@ -141,6 +141,9 @@ Panel {
   // (see allEnabled) because merging three backends is slower per keystroke
   // than searching one, which is the wrong default for a launcher.
   readonly property bool isAll: activeTab === 3
+  // The Updates tab is offered only when there is something to show. A launcher
+  // that offers an "Updates" tab with nothing in it teaches users to ignore it.
+  readonly property bool isUpdates: activeTab === 4
   readonly property bool isLive: root.isPacman || root.isFlatpak || root.isAur || root.isAll
   property string query: ""
 
@@ -222,6 +225,7 @@ Panel {
   }
 
   readonly property string appstreamStateScript: Qt.resolvedUrl("./appstream_state.py").toString().replace("file://", "")
+  readonly property string updateScanScript: Qt.resolvedUrl("./update_scan.sh").toString().replace("file://", "")
   readonly property string optionsFilePath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
 
   // Hardened options write: pushes the JSON to appstream_state.py write-options,
@@ -335,6 +339,9 @@ Panel {
     var list = [0]
     if (root.aurEnabled) list.push(2)
     if (root.flatpakEnabled) list.push(1)
+    // The Updates tab is offered only when there is something to show — an
+    // "Updates" tab that opens to an empty list teaches users to ignore it.
+    if (root.updateCount > 0) list.push(4)
     // Only worth a tab once there is something to merge, and only if the
     // user opted in.
     if (root.allEnabled && list.length > 2) list.push(3)
@@ -357,23 +364,27 @@ Panel {
     if (t === 0) return "Pacman"
     if (t === 1) return "Flatpak"
     if (t === 2) return "AUR"
+    if (t === 4) return "Updates"
     return "All"
   }
 
   function tabLabel() {
     if (isAll) return "All"
+    if (isUpdates) return "Updates (" + root.updateCount + ")"
     if (isPacman) return "Arch repos (Pacman)"
     if (isFlatpak) return "Flathub (Flatpak)"
     return "AUR (Yay / Paru)"
   }
   function tabCaption() {
     if (isAll) return "Search pacman, Flathub and the AUR at once"
+    if (isUpdates) return "Packages with a newer version available"
     if (isPacman) return "Search pacman packages"
     if (isFlatpak) return "Search Flatpak apps"
     return "Search AUR packages"
   }
   function tabPlaceholder() {
     if (isAll) return "Search everywhere… (gimp, spotify, libreoffice)"
+    if (isUpdates) return "Updates available"
     if (isPacman) return "Search Arch package… (gimp, obs, audacity)"
     if (isFlatpak) return "Search a Flatpak app… (gimp, obs, libreoffice)"
     return "Search AUR package… (spotify, google-chrome, vscode-bin)"
@@ -500,6 +511,12 @@ Panel {
   // "Updated: 28 …".
   function cardChips(e) {
     var chips = root.detailPoints(e)
+    // An update is stated with both versions — "1.0 → 2.0" — so the card never
+    // claims an update without saying what it is an update TO. It sits ahead of
+    // the static metadata because it is the one chip that changes what the card
+    // is for.
+    var upd = root.updateSpecFor(e)
+    if (upd) chips.unshift({ label: "Update", value: root.updateLabel(upd) })
     var when = root.fmtUpdated((e && e.updated) || "")
     if (when !== "") chips.push({ label: "Updated", value: when })
     return chips
@@ -574,6 +591,15 @@ Panel {
       { label: "Optional deps",  value: root.joinDeps(r.optionalDeps) },
       { label: "Conflicts with", value: root.joinDeps(r.conflictsWith) }
     ]
+    // When a package is already installed and the offered version differs,
+    // show the installed version too. This is the "what do I have vs what's
+    // available" line that makes the update chip above verifiable at a glance.
+var upd = root.updateSpecFor(r)
+    if (upd) {
+      out.splice(1, 0,
+        { label: "Installed", value: upd.from },
+        { label: "Update",    value: root.updateLabel(upd) })
+    }
     // Only for an installed pacman/AUR row, and only once `pacman -Qi` has
     // answered \u2014 this is the warning that removal would break another package.
     var req = root.depNames(r.requiredBy)
@@ -602,6 +628,18 @@ Panel {
       if (row.aurPkg !== "") root.fetchAurInfo(row.aurPkg)
       if (row.flatpakPkg !== "") root.fetchFlatpakInfo(row.flatpakPkg)
     }
+  }
+
+  // Open the details sheet for whichever row the keyboard cursor is on. The
+  // search field owns focus, so a printable key cannot be used — it would type
+  // into the query. F2 is the standard "properties/details" key and never
+  // reaches the field as text. Enter already installs; this is the way to look
+  // BEFORE committing.
+  function openDetailsCursor() {
+    if (filteredModel.count === 0) return
+    var idx = resultsList.currentIndex
+    if (idx < 0 || idx >= filteredModel.count) idx = 0
+    root.openDetails(filteredModel.get(idx))
   }
 
   // ---- AUR: the RPC's search interface does not return Depends/Conflicts/
@@ -750,6 +788,15 @@ Panel {
   function rebuildResults() {
     var q = root.query.toLowerCase().trim()
     buildModel()
+    // The Updates tab is not a search — it is the background scan's result set.
+    // Repopulating it from updateRows keeps it live as the scan refreshes, and
+    // ignores the query entirely.
+    if (root.isUpdates) {
+      var rows = root.updateRows
+      for (var i = 0; i < rows.length; i++) addRow(rows[i])
+      resultsList.currentIndex = rows.length > 0 ? 0 : -1
+      return
+    }
     if (q === "") return
     launchLiveSearch(q)
   }
@@ -775,7 +822,125 @@ Panel {
   // free, and they sit on the search path.
   property var installedPacman: ({})
   property var installedFlatpak: ({})
+  // name -> installed version, for the update check. `pacman -Q` prints
+  // "name version" on one line; flatpak supplies its own version column. Both
+  // are compared against the card's available version to decide whether an
+  // update is actually pending (see Model.needsUpdate).
+  property var installedVersions: ({})
   property double installedAt: 0
+
+  // ---- updates tab ----------------------------------------------------------
+  // The count is the single number the toolbar badge, the tab's visibility and
+  // the Updates list all read, so they can never disagree. It is filled by the
+  // background scan (update_scan.sh), which reports what each source OFFERS;
+  // the panel still confirms against the installed snapshot before offering an
+  // update, so a stale scan can never invent one.
+  property int updateCount: 0
+  property var updateRows: ([])
+  property double updatesAt: 0
+
+  function refreshUpdates() {
+    // A scan talks to three package managers, two of which may reach the
+    // network (AUR RPC / Flathub). Never let two overlap.
+    if (updateProc.running) return
+    root.updatesAt = Date.now()
+    updateProc.running = true
+  }
+
+  // One subprocess across all three sources. The helper is passed as $1 and is
+  // never interpolated into the script text. Names are read, never executed.
+  Process {
+    id: updateProc
+    running: false
+    command: ["sh", root.updateScanScript, root.aurHelper, "fossfetch-updates"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyUpdateScan(text || "")
+    }
+  }
+
+  // A quiet periodic re-scan so the bar badge stays honest while the panel sits
+  // closed for hours. Five minutes is frequent enough that "you have updates"
+  // is never stale for long, and rare enough not to be a background daemon.
+  Timer {
+    id: updateScanTimer
+    interval: 300000
+    repeat: true
+    // Start one shortly after launch so the badge is populated on the first
+    // bar render, rather than being blank for five minutes. The panel loads at
+    // shell startup, so this is the badge's first (and only) eager scan.
+    running: true
+    triggeredOnStart: false
+    onTriggered: root.refreshUpdates()
+  }
+
+  Timer {
+    id: firstUpdateScan
+    interval: 1500
+    repeat: false
+    running: true
+    onTriggered: {
+      // Let the shell finish starting before asking three package managers
+      // questions; running it during login competes with everything else.
+      if (root.updateCount === 0) root.refreshUpdates()
+    }
+  }
+
+  // Parse the "UPD|kind|name|<available>" lines into row objects the card can
+  // render. Each row carries the package key for its source so the card's
+  // existing pendingUpdate() logic recognises it and offers the Update button.
+  // Keyed by package name rather than carried as a model role: the row already
+  // identifies itself by whichever source key it has, so this needs no extra
+  // delegate property and no new ListModel role.
+  property var updateKeys: ({})
+
+  function isUpdateRow(e) {
+    if (!e) return false
+    var k = e.pacmanPkg !== "" ? e.pacmanPkg
+        : (e.aurPkg !== "" ? e.aurPkg : e.flatpakPkg)
+    return k !== "" && root.updateKeys[k] === true
+  }
+
+  function applyUpdateScan(text) {
+    var rows = []
+    var keys = ({})
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i]
+      if (line.indexOf("UPD|") !== 0) continue
+      var parts = line.split("|")
+      if (parts.length < 4) continue
+      var kind = parts[1]
+      var name = parts[2]
+      var avail = parts[3]
+      if (name === "" || avail === "") continue
+      var row = {
+        name: name, description: "", version: avail, website: "", repo: "",
+        arch: "", licenses: "", updated: "", rating: "", category: "",
+        thumbnail: "", iconName: "", downloadSize: "", installedSize: "",
+        dependsOn: "", optionalDeps: "", requiredBy: "", conflictsWith: "",
+        provides: "", groups: "", packager: "", branch: "", collection: "",
+        aurVotes: "", aurMaintainer: "", aurOutdated: "", _pkg: "",
+        pacmanPkg: "", aurPkg: "", flatpakPkg: ""
+      }
+      if (kind === "pacman") row.pacmanPkg = name
+      else if (kind === "flatpak") row.flatpakPkg = name
+      else { row.aurPkg = name; row._pkg = name }
+      keys[name] = true
+      rows.push(row)
+    }
+    // Stable, deterministic order: newest available version first is meaningless
+    // without a date, so sort by name for a list a user can scan by eye.
+    rows.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
+    root.updateRows = rows
+    root.updateKeys = keys
+    root.updateCount = rows.length
+    // If the user is looking at the Updates tab, it is now stale — repopulate.
+    // If everything got updated out from under them, fall back to Pacman rather
+    // than leaving them on an empty tab.
+    if (root.updateCount === 0 && root.isUpdates) root.switchTab(0)
+    else if (root.isUpdates) root.rebuildResults()
+  }
 
   function isPacmanInstalled(pkg) {
     return !!pkg && pkg !== "" && root.installedPacman[pkg] === true
@@ -788,6 +953,9 @@ Panel {
   function isFlatpakInstalled(id) {
     return !!id && id !== "" && root.installedFlatpak[id] === true
   }
+  function installedVersion(pkg) {
+    return (pkg && root.installedVersions[pkg]) ? String(root.installedVersions[pkg]) : ""
+  }
 
   function refreshInstalled(force) {
     if (!force && Date.now() - root.installedAt < 60000) return
@@ -799,19 +967,31 @@ Panel {
   function applyInstalled(text) {
     var pkgs = {}
     var flats = {}
+    var vers = {}
     var lines = String(text || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i]
       if (!line) continue
       var parts = line.split("|")
       if (parts.length < 2) continue
-      var name = parts.slice(1).join("|").trim()
+      // After the P|/F| tag the payload is "<name><sep><version>", where the
+      // separator is a SPACE for `pacman -Q` and a TAB for flatpak's column
+      // output. Package names never contain whitespace, so the first whitespace
+      // is always the name/version boundary — splitting on "|" here would leave
+      // the version glued to the name and silently break every lookup.
+      var rest = parts.slice(1).join("|")
+      var sp = rest.search(/\s/)
+      var name = sp === -1 ? rest : rest.slice(0, sp)
+      var ver = sp === -1 ? "" : rest.slice(sp + 1).trim()
+      name = name.trim()
       if (name === "") continue
       if (parts[0] === "P") pkgs[name] = true
       else if (parts[0] === "F") flats[name] = true
+      if (ver !== "") vers[name] = ver
     }
     root.installedPacman = pkgs
     root.installedFlatpak = flats
+    root.installedVersions = vers
     applyInstalledToRows()
   }
 
@@ -829,11 +1009,17 @@ Panel {
   }
 
   // One subprocess for both package managers. Names are read, never executed —
-  // they only become keys in the lookup objects below.
+  // they only become keys in the lookup objects below. `pacman -Q` prints
+  // "name version" per line (as opposed to -Qq's bare names) and flatpak is
+  // asked for its version column, so the same single call answers both
+  // "is it installed?" and "which version is installed?" for the update check.
   Process {
     id: installedProc
     running: false
-    command: ["sh", "-c", "pacman -Qq 2>/dev/null | sed 's/^/P|/'\nflatpak list --app --columns=application 2>/dev/null | sed 's/^/F|/'", "fossfetch-installed"]
+    command: ["sh", "-c",
+      "pacman -Q 2>/dev/null | sed 's/^/P|/'\n"
+      + "flatpak list --app --columns=application,version 2>/dev/null | sed 's/^/F|/'",
+      "fossfetch-installed"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyInstalled(text || "")
@@ -1687,23 +1873,23 @@ Panel {
   // exactly the same gesture as an install. A real dialog names the action,
   // cancels with Escape, and marks the destructive choice.
   property var pendingAction: null
-  // Only an install uses the timed arm. A removal goes straight to the dialog,
-  // which stays up until you answer it — a destructive action should never
-  // expire out from under the cursor.
+  // Only an install or an update uses the timed arm. A removal goes straight to
+  // the dialog, which stays up until you answer it — a destructive action should
+  // never expire out from under the cursor.
   Timer {
     id: confirmResetTimer
     interval: 3000
     repeat: false
     onTriggered: {
-      if (root.pendingAction && root.pendingAction.mode === "install")
-        root.pendingAction = null
+      var m = root.pendingAction ? root.pendingAction.mode : ""
+      if (m === "install" || m === "update") root.pendingAction = null
     }
   }
 
   function pendingMessage() {
     var a = root.pendingAction
     if (!a) return ""
-    var verb = a.mode === "remove" ? "Remove" : "Install"
+    var verb = a.mode === "remove" ? "Remove" : (a.mode === "update" ? "Update" : "Install")
     return verb + " " + (a.name || a.pkg) + " (" + a.pkg + ")?"
   }
 
@@ -1712,6 +1898,7 @@ Panel {
     if (!a) return
     root.pendingAction = null
     if (a.mode === "remove") root.runRemove(a.kind, a.pkg, a.name)
+    else if (a.mode === "update") root.runUpdate(a.kind, a.pkg, a.name, a.from, a.to)
     else root.runInstall(a.kind, a.pkg, a.name)
   }
 
@@ -1728,6 +1915,7 @@ Panel {
 
   function installPending(kind, pkg) { return root.actionPending("install", kind, pkg) }
   function removePending(kind, pkg) { return root.actionPending("remove", kind, pkg) }
+  function updatePending(kind, pkg) { return root.actionPending("update", kind, pkg) }
 
   function startInstall(kind, pkg, name) {
     // Second click on the armed button runs it, as before. Installing is not
@@ -1744,6 +1932,20 @@ Panel {
 
   function startRemove(kind, pkg, name) {
     root.pendingAction = { mode: "remove", kind: kind, pkg: pkg, name: name }
+  }
+
+  // Updating is NOT destructive — it moves a package forward, never away — so
+  // it uses the same non-modal arm-then-run path as an install rather than the
+  // Remove dialog. Two clicks: first arms, second runs.
+  function startUpdate(kind, pkg, name, from, to) {
+    if (root.actionPending("update", kind, pkg)) {
+      root.pendingAction = null
+      root.runUpdate(kind, pkg, name, from, to)
+      return
+    }
+    root.pendingAction = { mode: "update", kind: kind, pkg: pkg, name: name,
+                           from: from, to: to }
+    confirmResetTimer.restart()
   }
 
   // What the panel last launched, so the exit toast can name it. Captured at
@@ -1792,6 +1994,30 @@ Panel {
     // The package will be installed by the time the user comes back to this
     // panel; re-read the snapshot so the row shows as Installed, not stale.
     installFinishedTimer.restart()
+  }
+
+  // Update an already-installed package. For pacman the refresh of the sync
+  // database (-Sy) is required before the bump, otherwise pacman refuses with
+  // "target is up to date" against a stale cache. AUR helpers rebuild anyway
+  // and take the plain -S form; flatpak's own update path is `update <appid>`.
+  function runUpdate(kind, pkg, name, from, to) {
+    var args
+    if (kind === "pacman") args = ["sudo", "pacman", "-S", "-y", pkg]
+    else if (kind === "yay") args = ["yay", "-S", pkg]
+    else if (kind === "paru") args = ["paru", "-S", pkg]
+    else args = ["flatpak", "update", "-y", pkg]
+    root.lastActionLabel = name || pkg
+    root.lastActionKind = kind
+    root.lastActionVerb = "update"
+
+    var term = Quickshell.env("TERMINAL")
+    if (!term) term = Quickshell.env("TERMINAL_CMD")
+    if (!term) term = "kitty"
+    actionProc.command = [term, "-e"].concat(args)
+    actionProc.running = true
+    // Updates resolve and download; give the terminal room before re-reading
+    // the installed snapshot (matches the remove settle time).
+    removeFinishedTimer.restart()
   }
 
   // Undo an install. Removal is more destructive than install (it can take
@@ -1855,6 +2081,10 @@ Panel {
         root.sourceLabel(root.lastActionKind) + " " + root.lastActionVerb
         + " finished for " + what + ". See the terminal for the result.")
       root.refreshInstalled(true)
+      // An install or an update both change how many updates are pending, and
+      // the badge is on screen whether or not the panel is open.
+      root.updatesAt = 0
+      root.refreshUpdates()
       root.clipboardSuggestion()
     }
   }
@@ -1863,13 +2093,26 @@ Panel {
   function open() {
     root.controller.show()
     refreshFocus()
+    root.ensureFreshScan()
   }
 
   function openFromHotkey() {
     root.controller.show()
+    // The hotkey/IPC path does NOT go through open(), so the scan has to be
+    // requested here too — otherwise the badge and the Updates tab stay empty
+    // until the first periodic tick, however many times the panel is opened.
+    root.ensureFreshScan()
     Qt.callLater(function() {
       if (root.opened) refreshFocus()
     })
+  }
+
+  // Re-scan on demand, throttled so opening the panel in a tight loop does not
+  // spawn a checkupdates subprocess every time. The scan talks to three package
+  // managers, two of which can reach the network, so it is never run on top of
+  // itself.
+  function ensureFreshScan() {
+    if (Date.now() - root.updatesAt > 60000) root.refreshUpdates()
   }
 
   function close() {
@@ -2023,6 +2266,55 @@ Panel {
     return null
   }
 
+  // The newest update this row can offer across its sources, or null. A source
+  // only counts when the package is installed AND the version on offer is
+  // strictly newer (Model.needsUpdate), so a card never shows an "Update"
+  // for something already current. `to` is the offered version, `from` the
+  // installed one — both are shown so the update is never a mystery.
+  function pendingUpdate(e) {
+    if (!e) return null
+    var best = null
+    var consider = function(kind, pkg) {
+      if (!pkg || pkg === "") return
+      if (kind === "flatpak") { if (!root.isFlatpakInstalled(pkg)) return }
+      else if (!root.isPacmanInstalled(pkg)) return
+      var from = root.installedVersion(pkg)
+      var to = String(e.version || "")
+      if (!Model.needsUpdate(to, from)) return
+      if (!best || Model.compareVersions(to, best.to) === 1)
+        best = { kind: kind, pkg: pkg, from: from, to: to, name: e.name }
+    }
+    if (root.isPacman || root.isAll) consider("pacman", e.pacmanPkg)
+    if (root.isAur || root.isPacman || root.isAll) consider(root.aurHelper, e.aurPkg)
+    if (root.isFlatpak || root.isAll) consider("flatpak", e.flatpakPkg)
+    return best
+  }
+
+  // A short "old → new" string for the details sheet and the update chip.
+  function updateLabel(u) {
+    if (!u) return ""
+    // The installed version is absent when the scan landed before the pacman
+    // snapshot did; "→ 8.3.0" is still a true statement about the update.
+    return u.from !== "" ? u.from + " → " + u.to : "→ " + u.to
+  }
+
+  // The update action for a row, preferring what the panel can prove and
+  // falling back to what the scan asserted. On the Updates tab the install and
+  // remove controls are hidden, so a row that resolved to no action at all
+  // would be a dead card with nothing to click — the scan is the source's own
+  // verdict and is good enough to act on.
+  function updateSpecFor(e) {
+    if (!e) return null
+    var proven = root.pendingUpdate(e)
+    if (proven) return proven
+    if (!root.isUpdateRow(e)) return null
+    var kind = e.pacmanPkg !== "" ? "pacman" : (e.flatpakPkg !== "" ? "flatpak" : root.aurHelper)
+    var pkg = e.pacmanPkg !== "" ? e.pacmanPkg : (e.flatpakPkg !== "" ? e.flatpakPkg : e.aurPkg)
+    if (pkg === "") return null
+    return { kind: kind, pkg: pkg, from: root.installedVersion(pkg),
+             to: String(e.version || ""), name: e.name }
+  }
+
   // Enter on the highlighted card arms its action (first press shows the
   // button's "Confirm?" state); a second press runs the command. An
   // already-installed row arms the removal instead.
@@ -2031,6 +2323,13 @@ Panel {
     var idx = resultsList.currentIndex
     if (idx < 0 || idx >= filteredModel.count) return
     var row = filteredModel.get(idx)
+    // An available update outranks install/remove: if the user is looking at an
+    // installed package and newer exists, Enter should do the obvious thing.
+    var upd = root.pendingUpdate(row)
+    if (upd) {
+      root.startUpdate(upd.kind, upd.pkg, upd.name, upd.from, upd.to)
+      return
+    }
     var spec = root.cardInstallSpec(row)
     if (!spec) return
     if (spec.mode === "remove") root.startRemove(spec.kind, spec.pkg, row.name)
@@ -2512,7 +2811,11 @@ Icon {
                   }
                 }
                 if (event.key === Qt.Key_Escape) {
-                  root.close()
+                  // Unwind one layer at a time: the details sheet first, then the
+                  // panel. Closing the whole panel with the sheet open would look
+                  // like the sheet swallowed the key.
+                  if (detailsSheet.open) root.closeDetails()
+                  else root.close()
                   event.accepted = true
                 } else if (event.key === Qt.Key_Tab) {
                   root.switchPanel(1)
@@ -2525,6 +2828,12 @@ Icon {
                   event.accepted = true
                 } else if (event.key === Qt.Key_Up) {
                   root.moveCursor(0, -1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_F2) {
+                  // Look before you commit. Enter installs; F2 opens the details
+                  // sheet for the highlighted row. A printable key cannot be used
+                  // here because the search field owns focus and would type it.
+                  root.openDetailsCursor()
                   event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                   root.activateCursor()
@@ -2810,6 +3119,7 @@ Icon {
                         required property var modelData
                         label: modelData.label
                         value: modelData.value
+                        highlight: modelData.label === "Update"
                       }
                     }
                   }
@@ -2873,8 +3183,21 @@ Icon {
                     // Flexible spacer pushes the install buttons to the right.
                     Item { Layout.fillWidth: true }
 
+                    // One update control per card, driven by the newest update
+                    // across all of the row's sources. It is invisible until an
+                    // update genuinely exists, so a fully-updated system looks
+                    // exactly as it did before this feature.
+                    UpdateButton {
+                      readonly property var upd: root.updateSpecFor(delegateRoot)
+                      visible: upd !== null
+                      packageName: upd ? upd.pkg : ""
+                      version: upd ? upd.to : ""
+                      isPending: upd ? root.updatePending(upd.kind, upd.pkg) : false
+                      onArmed: root.startUpdate(upd.kind, upd.pkg, upd.name, upd.from, upd.to)
+                    }
+
                     InstallButton {
-                      visible: (root.isPacman || root.isAll) && delegateRoot.pacmanPkg !== ""
+                      visible: !root.isUpdates && (root.isPacman || root.isAll) && delegateRoot.pacmanPkg !== ""
                       installKind: "pacman"
                       packageName: delegateRoot.pacmanPkg
                       installed: delegateRoot.installedPacman === "1"
@@ -2884,7 +3207,7 @@ Icon {
                     }
 
                     InstallButton {
-                      visible: (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "yay"
+                      visible: !root.isUpdates && (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "yay"
                       installKind: "yay"
                       packageName: delegateRoot.aurPkg
                       unavailable: !root.aurHelperInstalled
@@ -2895,7 +3218,7 @@ Icon {
                     }
 
                     InstallButton {
-                      visible: (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "paru"
+                      visible: !root.isUpdates && (root.isPacman || root.isAur || root.isAll) && delegateRoot.aurPkg !== "" && root.aurHelper === "paru"
                       installKind: "paru"
                       packageName: delegateRoot.aurPkg
                       unavailable: !root.aurHelperInstalled
@@ -2910,7 +3233,7 @@ Icon {
                     // by the Flathub-equivalent pass, so a single card can offer
                     // the distro package AND its Flathub equivalent.
                     InstallButton {
-                      visible: delegateRoot.flatpakPkg !== ""
+                      visible: !root.isUpdates && delegateRoot.flatpakPkg !== ""
                       installKind: "flatpak"
                       packageName: delegateRoot.flatpakPkg
                       installed: delegateRoot.installedFlatpak === "1"
@@ -3271,11 +3594,15 @@ Icon {
     id: chip
     property string label: ""
     property string value: ""
+    // Chips are neutral by default — they are facts, not prompts. The Update
+    // chip opts into the confirm tint so the one fact on the card that changes
+    // what you would DO about it is the one that stands out.
+    property bool highlight: false
 
     implicitHeight: Style.space(20)
     implicitWidth: chipRow.implicitWidth + Style.space(10)
     radius: Math.max(2, Style.cornerRadius - Style.space(1))
-    color: Util.alpha(Color.popups.text, 0.055)
+    color: chip.highlight ? Util.alpha(root.confirmColor, 0.14) : Util.alpha(Color.popups.text, 0.055)
 
     Row {
       id: chipRow
@@ -3284,7 +3611,7 @@ Icon {
 
       Text {
         text: chip.label
-        color: Util.alpha(Color.popups.text, 0.42)
+        color: chip.highlight ? Util.alpha(root.confirmColor, 0.55) : Util.alpha(Color.popups.text, 0.42)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.letterSpacing: 0.4
@@ -3293,7 +3620,7 @@ Icon {
       }
       Text {
         text: chip.value
-        color: Util.alpha(Color.popups.text, 0.82)
+        color: chip.highlight ? root.confirmColor : Util.alpha(Color.popups.text, 0.82)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: true
@@ -3443,6 +3770,58 @@ Icon {
         if (btn.installed) btn.removed()
         else btn.armed()
       }
+    }
+  }
+
+  // A card can offer an update alongside its install/remove control: the
+  // package is installed, and the version in the repo has moved on. It sits as
+  // its OWN control rather than overloading InstallButton's label, because
+  // "Update" and "Remove" are opposites and a single button that means both
+  // depending on hidden state is exactly the kind of ambiguity the card
+  // redesign removed. Compact, and in the confirm colour so an available update
+  // is the thing your eye lands on.
+  component UpdateButton: Item {
+    id: ub
+    property string packageName: ""
+    property string version: ""
+    property bool isPending: false
+
+    signal armed()
+
+    implicitWidth: Style.space(78)
+    implicitHeight: Style.space(26)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: ub.isPending
+        ? Util.alpha(root.confirmColor, 0.28)
+        : (mouse.containsMouse ? Util.alpha(root.confirmColor, 0.30) : Util.alpha(root.confirmColor, 0.15))
+      border.width: Style.spacing.hairline
+      border.color: ub.isPending
+        ? root.confirmColor
+        : (mouse.containsMouse ? Util.alpha(root.confirmColor, 0.9) : Util.alpha(root.confirmColor, 0.55))
+
+      Behavior on border.color { ColorAnimation { duration: 150 } }
+
+      FitText {
+        anchors.fill: parent
+        anchors.margins: Style.spacing.xs
+        text: ub.isPending ? "Confirm?" : "Update"
+        color: ub.isPending || mouse.containsMouse ? root.confirmColor : Color.popups.text
+        baseSize: Style.font.caption
+        minSize: Style.font.bodySmall
+        horizontalAlignment: Text.AlignHCenter
+        elideMode: Text.ElideMiddle
+      }
+    }
+
+    MouseArea {
+      id: mouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: ub.armed()
     }
   }
 }

@@ -62,6 +62,28 @@ BarWidget {
   readonly property bool bareIcon: root.toolbarDesign === "icon"
   readonly property bool hot: mouseArea.containsMouse || root.opened
 
+  // ---- update badge ---------------------------------------------------------
+  // The count lives on the panel (one scan, one number) and is read back here
+  // rather than re-scanned in the bar, so the badge and the Updates tab can
+  // never disagree. The panel is loaded at all times, so this stays current
+  // while the popup is closed.
+  readonly property int updateCount: panelLoader.item
+    ? (panelLoader.item.updateCount || 0)
+    : 0
+
+  // 99+ rather than the real number: the badge is a nudge, not a report, and a
+  // four-digit pill would blow the button's width out.
+  readonly property string updateBadge: root.updateCount > 99
+    ? "99+"
+    : (root.updateCount > 0 ? String(root.updateCount) : "")
+
+  function tooltipText() {
+    return root.updateCount > 0
+      ? "Browse open-source packages — " + root.updateCount
+        + (root.updateCount === 1 ? " update available" : " updates available")
+      : "Browse open-source packages"
+  }
+
   function btnRadius() { return button.height / 2 }
 
   function btnBorderWidth() {
@@ -214,6 +236,35 @@ BarWidget {
         Behavior on opacity { NumberAnimation { duration: 180 } }
       }
 
+      // Update count badge. Drawn as an overlay on the pill's top-right rather
+      // than as a third item in rootLabel: adding it to the RowLayout would
+      // resize the button every time the count changed, so the bar would visibly
+      // twitch as updates were applied. Overlaying keeps the layout fixed.
+      Rectangle {
+        id: updateBadgeRect
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.rightMargin: -3
+        anchors.topMargin: -4
+        visible: root.updateBadge !== ""
+        width: badgeText.implicitWidth + 9
+        height: 14
+        radius: 7
+        color: root.accentColor
+        border.width: 1
+        border.color: root.surfaceAlt
+
+        Text {
+          id: badgeText
+          anchors.centerIn: parent
+          text: root.updateBadge
+          color: root.surfaceAlt
+          font.family: Style.font.resolvedFamily
+          font.pixelSize: Style.font.caption - 2
+          font.bold: true
+        }
+      }
+
       RowLayout {
         id: rootLabel
         anchors.centerIn: parent
@@ -263,7 +314,7 @@ BarWidget {
       acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
       onEntered: {
         if (root.bar && root.bar.showTooltip)
-          root.bar.showTooltip(button, "Browse open-source packages")
+          root.bar.showTooltip(button, root.tooltipText())
       }
       onExited: {
         if (root.bar && root.bar.hideTooltip) root.bar.hideTooltip(button)

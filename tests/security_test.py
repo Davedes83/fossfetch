@@ -39,6 +39,7 @@ PANEL = os.path.join(PLUGIN, "Panel.qml")
 PINS = os.path.join(PLUGIN, "appstream_pins.sh")
 BACKEND_PACMAN = os.path.join(PLUGIN, "backend_pacman.sh")
 BACKEND_FLATPAK = os.path.join(PLUGIN, "backend_flatpak.sh")
+UPDATE_SCAN = os.path.join(PLUGIN, "update_scan.sh")
 
 VER = "20260101"
 
@@ -757,6 +758,59 @@ class FossFetchTests(unittest.TestCase):
                                'echo "error: database missing" >&2\nexit 1\n'))
         self.assertIn("STATUS|error|pacman: error: database missing",
                       p.stdout, p.stdout)
+
+    def test_update_scan_frames_and_parses(self):
+        """The update scan's output contract.
+
+        Three things have to hold for the badge and the Updates tab to be
+        trustworthy:
+          * each source emits `UPD|kind|name|<available>` with the AVAILABLE
+            version (the panel looks the installed one up itself, from its
+            `pacman -Q` snapshot, so the two can never disagree about what is
+            installed);
+          * only real "name old -> new" rows become UPD lines — a stray
+            diagnostic must not be counted as a pending update;
+          * the run ends with a single STATUS|ok frame, so an empty result (the
+            healthy, common case) is not reported as a failure.
+        """
+        # repo package + AUR helper + a flatpak, all from one scan
+        path = self.fake_bin("checkupdates",
+                             'echo "vivaldi 8.2.4133.47-1 -> 8.3.0-1"\n')
+        self.fake_bin("yay",
+                             'echo "aurtool 1.0-1 -> 1.1-1"\n')
+        self.fake_bin("flatpak",
+                             'printf "org.vinegarhq.Sober\\t2.0.0\\n"\n')
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertIn("UPD|pacman|vivaldi|8.3.0-1", p.stdout, p.stdout)
+        self.assertIn("UPD|yay|aurtool|1.1-1", p.stdout, p.stdout)
+        self.assertIn("UPD|flatpak|org.vinegarhq.Sober|2.0.0", p.stdout, p.stdout)
+        self.assertTrue(p.stdout.rstrip().endswith("STATUS|ok|updates"), p.stdout)
+
+        # No updates anywhere is normal, not an error, and must not fabricate
+        # a row out of the empty output.
+        path = self.fake_bin("checkupdates", "exit 0\n")
+        self.fake_bin("yay", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertNotIn("UPD|", p.stdout, p.stdout)
+        self.assertIn("STATUS|ok|updates", p.stdout)
+        self.assertNotIn("STATUS|error", p.stdout)
+
+        # A missing tool is not a scan failure: it contributes no rows, and the
+        # other sources still get to report.
+        path = self.fake_bin("checkupdates", 'echo "git 2.40-1 -> 2.41-1"\n')
+        p = self.run_backend(UPDATE_SCAN, ["definitely-not-installed-helper"],
+                             path=path)
+        self.assertIn("UPD|pacman|git|2.41-1", p.stdout, p.stdout)
+        self.assertIn("STATUS|ok|updates", p.stdout)
+
+        # A warning line that is not "old -> new" must not become an update.
+        path = self.fake_bin("checkupdates",
+                             'echo "warning: database is out of date"\n'
+                             'echo "gimp 2.10.38-5 -> 2.10.38-6"\n')
+        p = self.run_backend(UPDATE_SCAN, [""], path=path)
+        self.assertIn("UPD|pacman|gimp|2.10.38-6", p.stdout, p.stdout)
+        self.assertNotIn("warning", p.stdout, p.stdout)
 
     # ------------------------------------------------------------ QML static
     def test_model_js_unit_tests_pass(self):

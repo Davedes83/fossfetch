@@ -221,6 +221,53 @@ eq(Model.matchReasonFor("<b>x</b>app", "<b>x</b>", false), 'Name starts with "<b
 eq(Model.matchReasonFor("gimp", "gimp", false), "Exact name match",
    "an exact match is reported as such, not as a category hit");
 
+// ------------------------------------------------------- version comparison
+//
+// The update chip is only honest if these hold. A false "update available" is
+// the damaging direction, so the unparseable cases are asserted to be inert.
+
+eq(Model.needsUpdate("2.0", "1.0"), true, "newer major offers an update");
+eq(Model.needsUpdate("1.0", "2.0"), false, "an older offer is never an update");
+eq(Model.needsUpdate("1.0", "1.0"), false, "identical versions are not an update");
+eq(Model.needsUpdate("", "1.0"), false, "no available version offers no update");
+eq(Model.needsUpdate("1.0", ""), false, "no installed version offers no update");
+eq(Model.needsUpdate(null, undefined), false, "missing values are inert");
+
+// pkgrel: the trailing -N is compared last and on its own.
+eq(Model.needsUpdate("1.0-2", "1.0-1"), true, "a bumped pkgrel is an update");
+eq(Model.needsUpdate("1.0-1", "1.0-2"), false, "a dropped pkgrel is not an update");
+eq(Model.needsUpdate("1.0-10", "1.0-9"), true, "pkgrel compares numerically, not lexically");
+
+// Multi-digit segments must not be compared as strings: "10" > "9" numerically.
+eq(Model.needsUpdate("2.10", "2.9"), true, "10 beats 9 even though '10' < '9' as text");
+eq(Model.needsUpdate("2.9", "2.10"), false, "9 does not beat 10");
+
+// Epoch overrides everything to its right.
+eq(Model.needsUpdate("1:1.0", "2.0"), true, "a higher epoch outranks a higher version");
+eq(Model.needsUpdate("2.0", "1:1.0"), false, "no epoch does not outrank one");
+eq(Model.needsUpdate("1:1.0", "1:1.0"), false, "same epoch and version is not an update");
+eq(Model.needsUpdate("1:1.1", "1:1.0"), true, "same epoch still compares the version");
+
+// Real-world Arch shapes.
+eq(Model.needsUpdate("2.10.38-5", "2.10.38-4"), true, "Arch style bump is an update");
+eq(Model.needsUpdate("1:1.19.8-1", "1.0.0-1"), true, "epoch bump on a real shape");
+eq(Model.needsUpdate("6.6.12.arch1-1", "6.6.11.arch1-1"), true, "Arch's .archN suffix bumps");
+eq(Model.needsUpdate("2.39.2-1", "2.39.2-1"), false, "identical Arch versions are not an update");
+
+// A version string that is not a version at all must not manufacture an update.
+// "unknown" sorts below "1" at the first segment (letters rank under numbers),
+// so the honest answer is "no update" rather than a guess in either direction.
+eq(Model.needsUpdate("unknown", "1.0"), false, "a non-numeric offer does not fabricate an update");
+eq(Model.compareVersions("unknown", "1.0"), -1, "letters rank below numbers at the same position");
+eq(Model.needsUpdate("1.0", ""), false, "blank installed version stays inert");
+
+// compareVersions is the primitive behind needsUpdate and is directly meaningful.
+eq(Model.compareVersions("1.2", "1.10"), -1, "1.2 < 1.10");
+eq(Model.compareVersions("1.10", "1.2"), 1, "1.10 > 1.2");
+eq(Model.compareVersions("1.0", "1.0"), 0, "equal versions compare equal");
+eq(Model.splitVersion("1:2.0-3").epoch, 1, "epoch is parsed out of the version");
+eq(Model.splitVersion("2.0-3").release, "3", "pkgrel is parsed out of the version");
+
 // -------------------------------------------------------------------- done
 
 if (failures.length > 0) {
