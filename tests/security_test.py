@@ -2058,6 +2058,22 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("centerOnBar: true", sheet)
         self.assertIn("anchorItem: panel.anchorItem", sheet)
 
+    def test_shell_restart_is_updates_only(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Updates only. An update replaces an app in place and the bar and dock
+        # keep serving its cached state until the shell re-reads it; a fresh
+        # install has no such problem, and a removal takes an entry away.
+        self.assertIn('if (root.lastActionVerb === "update") root.scheduleShellRestart()',
+                      src)
+        self.assertNotIn('root.lastActionVerb === "install"', src)
+        # Called from exactly one place: when a command finishes.
+        self.assertEqual(src.count("root.scheduleShellRestart()"), 1)
+        # Detached, so the restart is not killed by the shell it replaces.
+        self.assertIn('["setsid", "omarchy", "restart", "shell"]', src)
+        # Guarded, so a batch does not restart the shell once per package.
+        self.assertIn("if (root.shellRestartPending) return", src)
+
     def test_selection_is_keyed_not_indexed(self):
         with open(PANEL, encoding="utf-8") as fh:
             src = fh.read()

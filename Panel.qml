@@ -2819,6 +2819,20 @@ var upd = root.updateSpecFor(r)
       root.updatesAt = 0
       root.refreshUpdates()
       root.clipboardSuggestion()
+      // Updates only, and only from here.
+      //
+      // An update replaces an app in place, and the bar and dock keep serving
+      // the old one's cached state until the shell is told to re-read it --
+      // the update appears to do nothing until the desktop flashes. A fresh
+      // install has no such problem: its .desktop file is new, and the launchers
+      // pick that up on their next read. And a removal takes an entry away, so
+      // restarting for one would be pure disruption.
+      //
+      // The cost is real and deliberate: this tears down the bar, the dock and
+      // every other plugin. Scheduled rather than immediate so the toast above
+      // is readable first, and guarded so a batch does not restart the shell
+      // once per package.
+      if (root.lastActionVerb === "update") root.scheduleShellRestart()
     }
   }
 
@@ -2948,6 +2962,35 @@ var upd = root.updateSpecFor(r)
   // searching for: a package error, an app name someone pasted. Long or
   // multi-line clipboard contents are ignored — dropping a paragraph into the
   // box is never what anyone wants.
+  // Restart the shell once, shortly after an update lands.
+  property bool shellRestartPending: false
+
+  function scheduleShellRestart() {
+    if (root.shellRestartPending) return
+    root.shellRestartPending = true
+    shellRestartTimer.restart()
+  }
+
+  Timer {
+    id: shellRestartTimer
+    interval: 1800
+    repeat: false
+    onTriggered: root.restartShellNow()
+  }
+
+  // Detached, so the restart cannot be killed by the very shell it replaces,
+  // and so a failing restart command cannot take the panel down with it.
+  function restartShellNow() {
+    shellRestartProc.command = ["setsid", "omarchy", "restart", "shell"]
+    shellRestartProc.running = false
+    shellRestartProc.running = true
+  }
+
+  Process {
+    id: shellRestartProc
+    running: false
+  }
+
   function clipboardSuggestion() {
     clipProc.running = false
     clipProc.running = true
@@ -3643,6 +3686,7 @@ Icon {
               font.pixelSize: Style.font.caption - 1
               horizontalAlignment: Text.AlignHCenter
             }
+
           }
         }
 

@@ -92,6 +92,15 @@ already out of date, which is the other half of what a package manager is for.
   button is, and still asks for confirmation first; install and update keep the
   arm-then-run second click.
 
+### Added
+
+- **The shell restarts after you update a package from here.** An update
+  replaces an app in place, and the bar and dock keep serving the old one's
+  cached state until the shell is told to re-read it — so the update appears to
+  do nothing until the desktop flashes. A fresh install has no such problem
+  (its `.desktop` file is new, and launchers pick that up on their next read)
+  and a removal takes an entry away, so neither triggers a restart.
+
 ### Fixed
 
 - **The details sheet opened in the top-left corner.** It anchored below its
