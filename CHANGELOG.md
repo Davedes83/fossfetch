@@ -101,6 +101,15 @@ already out of date, which is the other half of what a package manager is for.
   (its `.desktop` file is new, and launchers pick that up on their next read)
   and a removal takes an entry away, so neither triggers a restart.
 
+  The restart runs as its own `systemd-run --user` unit, and
+  `restart_shell.sh` polls for the shell to answer before giving up, retrying
+  up to three times. Both parts are load-bearing: the first because the shell
+  runs in a systemd unit whose cgroup is torn down wholesale, taking any child
+  with it — so a restart spawned from inside the shell was killed by the very
+  thing it meant to outlive, and the session came back with no bar, no dock and
+  no shell at all. The second because this runs unattended off a package
+  update, where a failed relaunch means a desktop that never comes back.
+
 ### Fixed
 
 - **The details sheet opened in the top-left corner.** It anchored below its

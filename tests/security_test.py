@@ -2069,10 +2069,58 @@ class FossFetchTests(unittest.TestCase):
         self.assertNotIn('root.lastActionVerb === "install"', src)
         # Called from exactly one place: when a command finishes.
         self.assertEqual(src.count("root.scheduleShellRestart()"), 1)
-        # Detached, so the restart is not killed by the shell it replaces.
-        self.assertIn('["setsid", "omarchy", "restart", "shell"]', src)
+        # Launched under the user manager, so it is not killed by the cgroup it
+        # tears down. Covered in depth by
+        # test_shell_restart_survives_the_cgroup_it_kills.
+        self.assertIn('"systemd-run", "--user"', src)
         # Guarded, so a batch does not restart the shell once per package.
         self.assertIn("if (root.shellRestartPending) return", src)
+
+    def test_shell_restart_survives_the_cgroup_it_kills(self):
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # NOT setsid. The shell runs under a systemd unit, and `quickshell kill`
+        # tears down that whole cgroup -- a setsid child is still inside it and
+        # dies with the thing it was meant to outlive. The relaunch then never
+        # happened and the session was left with no bar, no dock and no shell.
+        # Verified by watching it happen, not predicted.
+        self.assertIn('"systemd-run", "--user"', src)
+        self.assertNotIn('"setsid", "omarchy", "restart", "shell"', src)
+        self.assertIn("restart_shell.sh", src)
+
+    def test_restart_script_will_not_strand_the_session(self):
+        import tempfile, shutil, subprocess, os as _os
+        script = os.path.join(PLUGIN, "restart_shell.sh")
+        with open(script, encoding="utf-8") as fh:
+            src = fh.read()
+        # It polls for the shell to answer and retries if it does not. This runs
+        # unattended off a package update; "the relaunch failed" must not mean
+        # "the user's desktop is gone".
+        self.assertIn("omarchy-shell shell ping", src)
+        self.assertIn("while [ \"$attempt\" -le 3 ]", src)
+
+        # Behaviour, with a stub that never answers.
+        d = tempfile.mkdtemp()
+        try:
+            stub = _os.path.join(d, "omarchy-shell")
+            with open(stub, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexit 1\n")
+            _os.chmod(stub, 0o755)
+            restart = _os.path.join(d, "omarchy")
+            with open(restart, "w", encoding="utf-8") as fh:
+                fh.write('#!/bin/sh\necho restart >> "%s/calls"\nexit 0\n' % d)
+            _os.chmod(restart, 0o755)
+            env = dict(_os.environ, PATH=d + ":" + _os.environ.get("PATH", ""))
+            out = subprocess.run(["/bin/sh", script], capture_output=True,
+                                 text=True, env=env, timeout=180)
+            with open(_os.path.join(d, "calls"), encoding="utf-8") as fh:
+                calls = fh.read().count("restart")
+            # It must have tried more than once: a single failed relaunch is
+            # exactly the case that left the user with no shell.
+            self.assertGreaterEqual(calls, 2, "must retry a failed relaunch")
+            self.assertIn("STATUS|failed", out.stdout)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_selection_is_keyed_not_indexed(self):
         with open(PANEL, encoding="utf-8") as fh:

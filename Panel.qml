@@ -2276,6 +2276,7 @@ var upd = root.updateSpecFor(r)
   readonly property string appstreamIconScript: Qt.resolvedUrl("./appstream_icons.sh").toString().replace("file://", "")
   readonly property string appstreamGroupsScript: Qt.resolvedUrl("./appstream_groups.sh").toString().replace("file://", "")
   readonly property string installHotkeyScript: Qt.resolvedUrl("./install_hotkey.sh").toString().replace("file://", "")
+  readonly property string restartShellScript: Qt.resolvedUrl("./restart_shell.sh").toString().replace("file://", "")
   readonly property string hotkeyCombo: "SUPER + CTRL + SHIFT + F"
   readonly property string iconCacheDir: Quickshell.env("HOME") + "/.cache/fossfetch"
 
@@ -2978,10 +2979,22 @@ var upd = root.updateSpecFor(r)
     onTriggered: root.restartShellNow()
   }
 
-  // Detached, so the restart cannot be killed by the very shell it replaces,
-  // and so a failing restart command cannot take the panel down with it.
+  // Under the user manager, NOT with setsid.
+  //
+  // `omarchy restart shell` relaunches through `hyprctl dispatch`, which needs
+  // HYPRLAND_INSTANCE_SIGNATURE. A child of Quickshell does not have it, so
+  // the relaunch silently did nothing and the session was left with no bar, no
+  // dock and no shell -- verified, not predicted. systemd-run hands it the
+  // user manager's environment, which is the one the session itself has, and
+  // keeps it independent of the shell it is about to replace.
+  //
+  // restart_shell.sh additionally polls for the shell to come back and retries
+  // if it does not. This runs unattended, so "the relaunch failed" must not
+  // mean "the user's desktop is gone".
   function restartShellNow() {
-    shellRestartProc.command = ["setsid", "omarchy", "restart", "shell"]
+    shellRestartProc.command = ["systemd-run", "--user", "--quiet", "--collect",
+                                "--unit=fossfetch-shell-restart",
+                                "/usr/bin/sh", root.restartShellScript]
     shellRestartProc.running = false
     shellRestartProc.running = true
   }
