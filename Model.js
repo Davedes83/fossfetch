@@ -28,7 +28,19 @@ function isInsideCache(path, cacheDir) {
     var dir = String(cacheDir || "");
     if (dir === "") return false;
     if (p === dir) return false;          // the directory itself, not a file
-    return p.indexOf(dir + "/") === 0;
+    if (p.indexOf(dir + "/") !== 0) return false;
+    // The prefix test alone still lets a traversal through: the path starts
+    // with the cache dir and then walks back out with "..". Every component of
+    // the part inside the cache has to be a real name -- no "", no ".", no
+    // "..". Empty components would also mean a "//" or a trailing "/", which is
+    // never a file the panel asked for.
+    var rel = p.slice(dir.length + 1);
+    var parts = rel.split("/");
+    for (var i = 0; i < parts.length; i++) {
+        var c = parts[i];
+        if (c === "" || c === "." || c === "..") return false;
+    }
+    return true;
 }
 
 // ------------------------------------------------------------------ dates
@@ -162,12 +174,17 @@ function fuzzySubsequence(q, n) {
 // substring (so "gimp 2" finds "gimp2"), then the fuzzy subsequence.
 function rank(name, q) {
     var n = String(name).toLowerCase();
-    if (n === q) return 0;
-    if (n.indexOf(q) === 0) return 1;
-    if (n.indexOf(q) !== -1) return 2;
-    var base = String(q).replace(/[^a-z0-9]/g, "");
+    // Lower the needle too: the panel matches the lowercased text as the user
+    // typed it, but callers that pass an original-cased name ("FireFox") would
+    // otherwise rank every row 5 -- "no match" -- and the list would come back
+    // in backend order with nothing looking relevant.
+    var needle = String(q).toLowerCase();
+    if (n === needle) return 0;
+    if (n.indexOf(needle) === 0) return 1;
+    if (n.indexOf(needle) !== -1) return 2;
+    var base = needle.replace(/[^a-z0-9]/g, "");
     if (base.length >= 3 && n.indexOf(base) !== -1) return 3;
-    if (fuzzySubsequence(q, n)) return 4;
+    if (fuzzySubsequence(needle, n)) return 4;
     return 5;
 }
 
@@ -358,7 +375,7 @@ var SORT_MODES = ["relevance", "installed", "popularity", "updated", "name"];
 // harness. So the panel must call this; reading `Model.SORT_MODES` works in Node
 // and is silently `undefined` in QML, which is exactly how the settings load
 // ended up throwing inside its try/catch and quietly dropping every preference.
-function sortModes() { return SORT_MODES; }
+function sortModes() { return SORT_MODES.slice(0); }
 
 // Comparable key for the "Updated" sort, or -1 when the row has no date.
 // Missing sorts LAST, not first: a row with no build time is not the newest
@@ -492,6 +509,11 @@ function sortRows(rows, mode) {
         arr.sort(byName);
     } else if (m === "installed") {
         if (mixedInstalled(arr)) arr.sort(byInstalled);
+    } else {
+        // An unknown mode is the same contract as "relevance": hand back the
+        // backend ranking. Falling through with the input untouched would look
+        // like a sort that silently does nothing.
+        arr.sort(byOrder);
     }
     return arr;
 }

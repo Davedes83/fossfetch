@@ -356,6 +356,11 @@ resolve_groups() {
 
   [ -f "$STORE/current" ] || return 0
   date_dir=$(cat "$STORE/current" 2>/dev/null)
+  # The marker is a FILE holding the version, and it is read back from disk and
+  # used to build a path — validate it here exactly as build_groups does, so a
+  # hand-edited or corrupted marker cannot steer this read outside the catalog
+  # root.
+  valid_version "$date_dir" || return 0
   index="$STORE/$date_dir/groups.tsv"
   [ -f "$index" ] || return 0
 
@@ -369,10 +374,22 @@ resolve_groups() {
 # in the background.
 groups_stale() {
   [ -f "$STORE/current" ] || return 0
-  local g m
-  g=$(stat -c %Y "$STORE/current/groups.tsv" 2>/dev/null || echo 0)
+  local g m date_dir index
+  # `current` is a FILE holding the version, not a directory: the old code
+  # statted a groups.tsv *under* it, which never resolved, always returned 0,
+  # and made this function unconditionally true -- so every search kicked off a
+  # rebuild and a perfectly fresh index was thrown away. Stat the index the
+  # marker actually names.
+  date_dir=$(cat "$STORE/current" 2>/dev/null)
+  valid_version "$date_dir" || return 0
+  index="$STORE/$date_dir/groups.tsv"
+  [ -f "$index" ] || return 0
+  [ -s "$index" ] || return 0
+  g=$(stat -c %Y "$index" 2>/dev/null || echo 0)
   m=$(stat -c %Y "$STORE/current" 2>/dev/null || echo 0)
-  [ -s "$STORE/current/groups.tsv" ] || return 0
+  # Missing index or unreadable marker counts as stale, so a rebuild is
+  # attempted; a genuinely newer index is not.
+  [ "$g" -ge 1 ] || return 0
   [ "$g" -lt "$m" ]
 }
 

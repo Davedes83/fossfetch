@@ -41,6 +41,7 @@ PINS = os.path.join(PLUGIN, "appstream_pins.sh")
 BACKEND_PACMAN = os.path.join(PLUGIN, "backend_pacman.sh")
 BACKEND_FLATPAK = os.path.join(PLUGIN, "backend_flatpak.sh")
 UPDATE_SCAN = os.path.join(PLUGIN, "update_scan.sh")
+HOTKEY = os.path.join(PLUGIN, "install_hotkey.sh")
 
 VER = "20260101"
 
@@ -855,6 +856,225 @@ class FossFetchTests(unittest.TestCase):
         self.assertNotIn("root.updateCount = 0", guard,
                          "an incomplete scan must never zero the known count")
 
+    def test_aur_helper_failure_is_not_reported_as_no_updates(self):
+        """A failing AUR helper is a failed source, exactly like checkupdates.
+
+        `yay -Qua` / `paru -Qua` exit non-zero when the pacman lock is held
+        (the seconds right after a shell start, when the eager scan runs) and
+        print nothing on stdout. Sending stderr to /dev/null turned that into
+        zero rows and a confident `STATUS|ok|updates`, so the panel reported
+        "no updates" for a check that never ran.
+        """
+        path = self.fake_bin(
+            "paru",
+            'echo "error: failed to init transaction (could not lock database)" >&2\n'
+            "exit 1\n")
+        self.fake_bin("checkupdates", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["paru"], path=path)
+        self.assertIn("SCANFAIL|paru", p.stdout, p.stdout)
+        self.assertIn("STATUS|degraded|updates", p.stdout, p.stdout)
+        self.assertNotIn("STATUS|ok|updates", p.stdout,
+                         "a scan whose AUR helper failed must not claim to be clean")
+        self.assertIn("could not lock database", p.stdout, p.stdout)
+
+        # A PARTIAL scan degrades too: pacman answered, the helper did not.
+        path = self.fake_bin(
+            "paru",
+            'echo "error: could not lock database" >&2\nexit 1\n')
+        self.fake_bin("checkupdates", 'echo "git 2.40-1 -> 2.41-1"\n')
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["paru"], path=path)
+        self.assertIn("UPD|pacman|git|2.41-1", p.stdout, p.stdout)
+        self.assertIn("SCANFAIL|paru", p.stdout, p.stdout)
+        self.assertIn("STATUS|degraded|updates", p.stdout, p.stdout)
+
+        # A helper that answers cleanly is still just fine.
+        path = self.fake_bin("paru", 'echo "yay-pkg 1.0-1 -> 1.1-1"\n')
+        self.fake_bin("checkupdates", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["paru"], path=path)
+        self.assertIn("UPD|paru|yay-pkg|1.1-1", p.stdout, p.stdout)
+        self.assertIn("STATUS|ok|updates", p.stdout, p.stdout)
+        self.assertNotIn("SCANFAIL|", p.stdout, p.stdout)
+
+    def test_partial_scan_stays_degraded_in_the_panel(self):
+        """A partial scan keeps the rows it found AND stays degraded.
+
+        Only a scan where EVERY source failed was treated as unusable; a scan
+        that lost one source cleared the flag and stopped the retry, so the
+        missing source never came back until the next five-minute tick.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("root.updatesDegraded = degraded", src)
+        # Degraded is driven by the flag, never by "did we get rows".
+        self.assertNotIn("root.updatesDegraded = false", src)
+        guard = src[src.index("root.updatesDegraded = degraded"):]
+        guard = guard[:guard.index("root.updateCount = rows.length")]
+        self.assertIn("if (degraded) updateRetry.start()", guard)
+        self.assertIn("else updateRetry.stop()", guard)
+
+    def test_state_paths_cannot_climb_out_of_the_catalog(self):
+        """rmtree/put/tmpfile validate their path, like swap already did.
+
+        Each of these names is used directly by os.open/os.lstat/os.unlink, so a
+        "../" in one lands the operation outside the catalog -- a recursive
+        delete reaching into the rest of the cache, or a temp file written
+        somewhere else entirely.
+        """
+        cache = os.path.join(self.root, "state-cache")
+        os.makedirs(cache, exist_ok=True)
+        self.assertEqual(subprocess.run([sys.executable, STATE, "ensure", cache],
+                                        capture_output=True, text=True,
+                                        timeout=60).returncode, 0)
+
+        # rmtree with no path at all used to raise ValueError out of a tuple
+        # unpack: a usage error reported as a traceback.
+        p = subprocess.run([sys.executable, STATE, "rmtree", cache],
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("Traceback", p.stderr, p.stderr)
+        self.assertIn("usage:", p.stderr, p.stderr)
+
+        # A victim planted outside the catalog must survive every path.
+        victim_dir = os.path.join(self.root, "outside")
+        os.makedirs(victim_dir, exist_ok=True)
+        victim = os.path.join(victim_dir, "precious")
+        with open(victim, "w") as fh:
+            fh.write("keep me")
+        outside = os.path.join(cache, "..", "outside")
+        for args in (["rmtree", cache, outside],
+                     ["rmtree", cache, "v1/../../outside"],
+                     ["put", cache, "../outside/planted"],
+                     ["swap", cache, "../outside/precious", "v1"]):
+            if args[0] == "put":
+                p = subprocess.run([sys.executable, STATE] + args,
+                                   input="x", capture_output=True, text=True,
+                                   timeout=60)
+            else:
+                p = subprocess.run([sys.executable, STATE] + args,
+                                   capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(p.returncode, 0, "%s was accepted" % args)
+            self.assertNotIn("Traceback", p.stderr, p.stderr)
+        self.assertTrue(os.path.exists(victim), "a traversal deleted a file outside the catalog")
+        self.assertFalse(os.path.exists(os.path.join(victim_dir, "planted")))
+
+        # tmpfile's <ver> becomes a directory and <prefix> a file name inside
+        # it, so both are single-name checks.
+        for ver, prefix in (("../outside", "p"), ("v1", "../p")):
+            p = subprocess.run([sys.executable, STATE, "tmpfile", cache, ver, prefix],
+                               capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(p.returncode, 0, "tmpfile accepted %r/%r" % (ver, prefix))
+            self.assertNotIn("Traceback", p.stderr, p.stderr)
+
+        # Legitimate use still works: a real nested path is written and removed.
+        os.makedirs(os.path.join(cache, "catalog", "v1"), exist_ok=True)
+        p = subprocess.run([sys.executable, STATE, "put", cache, "v1/a.txt"],
+                           input="hello", capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(os.path.join(cache, "catalog", "v1", "a.txt")))
+        p = subprocess.run([sys.executable, STATE, "tmpfile", cache, "v1", "pfx"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = subprocess.run([sys.executable, STATE, "rmtree", cache, "v1"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(cache, "catalog", "v1")))
+
+    def test_aur_byte_cap_ignores_a_nonsense_value(self):
+        """FOSSFETCH_MAX_AUR is a safety limit, not a setting worth crashing on.
+
+        `int()` at import time turned `FOSSFETCH_MAX_AUR=abc` into an unhandled
+        ValueError, and the whole search died before it made a request.
+        """
+        for bad in ("abc", "", "  ", "-5", "0", "1e6", "8388608x"):
+            e = self.env()
+            e["FOSSFETCH_MAX_AUR"] = bad
+            e["AUR_RPC_URL"] = "http://127.0.0.1:1/rpc/"
+            p = subprocess.run([sys.executable, AUR, "gimp"], capture_output=True,
+                               text=True, timeout=60, env=e)
+            self.assertNotIn("Traceback", p.stderr,
+                             "FOSSFETCH_MAX_AUR=%r crashed the search" % bad)
+            # The search still RAN and reported its own failure in-band; a bad
+            # cap must not stop it from getting that far.
+            self.assertIn("STATUS|error|", p.stdout, p.stdout)
+        # A real override is still honoured.
+        e = self.env()
+        e["FOSSFETCH_MAX_AUR"] = "1024"
+        e["AUR_RPC_URL"] = "http://127.0.0.1:1/rpc/"
+        p = subprocess.run([sys.executable, AUR, "gimp"], capture_output=True,
+                           text=True, timeout=60, env=e)
+        self.assertIn("STATUS|error|", p.stdout, p.stdout)
+        self.assertNotIn("Traceback", p.stderr, p.stderr)
+
+    def test_group_staleness_compares_the_index_it_actually_names(self):
+        """`current` is a FILE holding the version, not a directory.
+
+        groups_stale stat'd "$STORE/current/groups.tsv", which never existed, so
+        the index mtime was always 0 and the function was always true: every
+        search threw away a perfectly fresh index and kicked off a rebuild.
+        """
+        with open(GROUPS, encoding="utf-8") as fh:
+            src = fh.read()
+        # Read the version out of the marker, then stat the index it names --
+        # never a path built by treating the marker FILE as a directory.
+        body = src[src.index("groups_stale() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertNotIn('"$STORE/current/groups.tsv"', body,
+                         "the marker is a file; its groups.tsv never resolved")
+        # The stale check reads the version and stats the index it names.
+        self.assertIn('index="$STORE/$date_dir/groups.tsv"', src)
+        # ...and a hand-edited marker cannot steer it out of the catalog.
+        self.assertIn('valid_version "$date_dir" || return 0', src)
+
+    def test_hotkey_combo_cannot_inject_lua(self):
+        """$COMBO is written into hyprland.lua, which is LUA.
+
+        A combo carrying a quote closed the string and appended whatever came
+        after it to the user's Hyprland config. A real combo is only modifier
+        and key names joined by " + ", so anything outside that alphabet is
+        refused outright rather than escaped.
+        """
+        d = os.path.join(self.root, "hypr")
+        os.makedirs(d, exist_ok=True)
+        lua = os.path.join(d, "hyprland.lua")
+        with open(lua, "w") as fh:
+            fh.write("-- user config\n")
+        for bad in ('SUPER", os.execute("id"), "',
+                    "SUPER + CTRL + SHIFT + F') os.exit() --",
+                    "SUPER\nSHIFT"):
+            p = subprocess.run(["sh", HOTKEY, d, bad], capture_output=True,
+                               text=True, timeout=60)
+            self.assertIn("STATUS|bad-combo", p.stdout, p.stdout)
+        with open(lua, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "-- user config\n",
+                             "a rejected combo still wrote to the config")
+        # A real combo is still installed.
+        p = subprocess.run(["sh", HOTKEY, d, "SUPER + CTRL + SHIFT + F"],
+                           capture_output=True, text=True, timeout=60)
+        self.assertIn("STATUS|installed", p.stdout, p.stdout)
+        with open(lua, encoding="utf-8") as fh:
+            self.assertIn('o.bind("SUPER + CTRL + SHIFT + F"', fh.read())
+
+    def test_enter_installs_a_flatpak_only_row(self):
+        """cardInstallSpec covers every InstallButton the card can show.
+
+        The Flathub button shows whenever the row carries an app id, on any
+        tab. Without the matching branch, Enter did nothing on a flatpak-only
+        row while the card showed a button, and a batch silently dropped it.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        body = src[src.index("function cardInstallSpec"):]
+        body = body[:body.index("\n  }")]
+        self.assertIn('kind: "flatpak"', body)
+        self.assertIn("e.flatpakPkg", body)
+        self.assertIn("root.isFlatpakInstalled", body)
+        # And the batch path understands that kind: batchCommand's flatpak arm
+        # is the default, so no kind silently falls through to nothing.
+        self.assertIn('return ["flatpak", "install", "--assumeyes", "flathub"].concat(pkgs)', src)
+
     # ------------------------------------------------------------ QML static
     def test_model_js_unit_tests_pass(self):
         """Run tests/model_test.js. The pure logic in Model.js is what the
@@ -1217,7 +1437,10 @@ class FossFetchTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(PLUGIN, "alternatives.json")))
         # Default off, and the tab is only offered when it was switched on.
         self.assertIn("property bool allEnabled: false", src)
-        self.assertIn("if (root.allEnabled && list.length > 2) list.push(3)", src)
+        # Still opt-in, and the opt-in is honoured as soon as there are TWO
+        # source tabs to merge: the old "> 2" test hid the tab the user had
+        # explicitly switched on whenever AUR was disabled (Pacman + Flatpak).
+        self.assertIn("if (root.allEnabled && list.length > 1) list.push(3)", src)
         # The segmented control renders visibleTabs() directly, so that list is
         # now the single place the All tab can be shown from - one source of
         # truth, rather than a second visibility test that could disagree.

@@ -55,7 +55,20 @@ fi
 # helper name is passed in rather than probed so the panel stays the single
 # place that decides which one is in use.
 if [ -n "$HELPER" ] && command -v "$HELPER" >/dev/null 2>&1; then
-  "$HELPER" -Qua 2>/dev/null |
+  # Same treatment as checkupdates above: a helper that could not answer (db
+  # locked right after a shell start, broken git state, no network) exits
+  # non-zero and prints nothing on stdout. Treating that as "no AUR updates"
+  # reported a clean scan while the check never ran, which is the one thing
+  # FAILED exists to prevent.
+  au_out=$("$HELPER" -Qua 2>&1)
+  au_rc=$?
+  if [ "$au_rc" -ne 0 ]; then
+    au_reason=$(printf '%s\n' "$au_out" | grep -m1 -i "error\|lock\|failed\|fatal" | cut -c1-120)
+    [ -n "$au_reason" ] || au_reason="exit $au_rc"
+    echo "SCANFAIL|$HELPER|$au_reason"
+    FAILED=$((FAILED + 1))
+  fi
+  printf '%s\n' "$au_out" |
     awk -v h="$HELPER" '$3 == "->" && $1 != "" { print "UPD|" h "|" $1 "|" $4 }'
 fi
 

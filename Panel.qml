@@ -837,8 +837,10 @@ function batchPkgCount(mode) {
     // "Updates" tab that opens to an empty list teaches users to ignore it.
     if (root.updateCount > 0) list.push(4)
     // Only worth a tab once there is something to merge, and only if the
-    // user opted in.
-    if (root.allEnabled && list.length > 2) list.push(3)
+    // user opted in. "Something to merge" is TWO or more source tabs, not
+    // three: with AUR disabled and Flatpak enabled, Pacman+Flatpak is already
+    // a merge and the > 2 test hid the tab the user had explicitly opted into.
+    if (root.allEnabled && list.length > 1) list.push(3)
     return list
   }
 
@@ -1603,13 +1605,22 @@ var upd = root.updateSpecFor(r)
     // turned that into a confident empty result, so the badge and the Updates
     // tab vanished until the next five-minute tick even though updates were
     // waiting. Keep whatever we already knew and come back shortly.
+    // A TOTAL failure keeps what we already knew: there is nothing to replace it
+    // with, and zeroing it would hide the badge and the Updates tab exactly
+    // when updates are waiting.
     if (degraded && rows.length === 0) {
       root.updatesDegraded = true
       updateRetry.start()
       return
     }
-    root.updatesDegraded = false
-    updateRetry.stop()
+    // A PARTIAL scan is degraded too. pacman answered but the AUR helper was
+    // locked, say: these rows are real, but they are not the whole answer, and
+    // clearing the flag stopped the retry that would have filled in the rest.
+    // So take the rows it DID find, and stay degraded until a scan comes back
+    // with no SCANFAIL at all.
+    root.updatesDegraded = degraded
+    if (degraded) updateRetry.start()
+    else updateRetry.stop()
     root.updateRows = rows
     root.updateKeys = keys
     root.updateCount = rows.length
@@ -3132,6 +3143,14 @@ var upd = root.updateSpecFor(r)
     if ((root.isPacman || root.isAur || root.isAll) && e.aurPkg && e.aurPkg !== "") {
       return { mode: root.isAurInstalled(e.aurPkg) ? "remove" : "install",
                kind: root.aurHelper, pkg: e.aurPkg }
+    }
+    // Mirrors the Flathub InstallButton: shown whenever the row carries a Flathub
+    // app id, not only on the Flatpak tab, because a pacman/AUR row can also
+    // offer its Flathub equivalent. Without this branch Enter did nothing on a
+    // flatpak-only row, and a batch dropped it while the card showed a button.
+    if (e.flatpakPkg && e.flatpakPkg !== "") {
+      return { mode: root.isFlatpakInstalled(e.flatpakPkg) ? "remove" : "install",
+               kind: "flatpak", pkg: e.flatpakPkg }
     }
     return null
   }

@@ -112,6 +112,65 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **Enter did nothing on a Flatpak-only row.** The Flathub install button shows
+  on any tab whenever a row carries an app id, but the keyboard path only knew
+  about the pacman and AUR branches, so the card offered a button that Enter
+  ignored and a batch silently dropped. Both now use the same rule.
+
+- **The All tab stayed hidden after being switched on.** It needed three source
+  tabs to appear, so with AUR disabled Pacman+Flatpak — already a merge — did
+  not qualify and the opt-in appeared to do nothing. Two source tabs is enough.
+
+- **A partial update scan was reported as a complete one.** Only a scan that
+  lost *every* source was treated as unusable: pacman answering while the AUR
+  helper was locked took the rows, cleared the degraded flag and stopped the
+  retry, so the missing source stayed missing until the next tick. Any
+  `SCANFAIL` now keeps the flag and the retry, whatever the scan did find.
+
+- **A failing AUR helper looked like a clean scan.** `yay -Qua` / `paru -Qua`
+  exit non-zero when the pacman lock is held — the seconds right after a shell
+  start — and their stderr was discarded, so the panel reported "no updates"
+  for a check that never ran. They are now handled exactly like `checkupdates`
+  and `flatpak`: a failure is a `SCANFAIL` line and a degraded status.
+
+- **`FOSSFETCH_MAX_AUR` could crash the search outright.** A non-numeric value
+  raised `ValueError` at import time and killed the search before it made a
+  request. The cap is a safety limit, not a setting worth failing over, so a
+  bad, empty or negative value falls back to the 8 MiB default.
+
+- **A `..` in the cache path was not refused.** The containment check was a
+  prefix test, so a path inside the cache that walked back out with `..` passed
+  it and was left for URL normalisation to fix. Every component now has to be a
+  real name — no `.`, no `..`, no empty component.
+
+- **The catalog state helper accepted traversal paths.** `rmtree`, `put` and
+  `tmpfile` used their path arguments directly, so `../` reached outside the
+  catalog — a recursive delete into the rest of the cache, or a temp file
+  written elsewhere. They now validate like `swap` already did, and `rmtree`
+  with no path reports a usage error instead of a traceback.
+
+- **The group index was rebuilt on every search.** `groups_stale` statted a
+  `groups.tsv` *underneath* the `current` marker, which is a file, so the index
+  mtime always read as zero and the function was always true: a fresh index was
+  thrown away and a rebuild kicked off behind every keystroke. It now stats the
+  index the marker actually names, and the marker is validated before it is
+  used as a path.
+
+- **Ranking ignored the case of the query.** The needle was compared against an
+  already-lowercased name, so a search carrying capitals ranked every row as "no
+  match" and the list came back in backend order.
+
+- **An unrecognised sort mode silently did nothing.** It fell through with the
+  input untouched; per the contract, anything unknown is "relevance", so it now
+  restores the backend order. `sortModes` also hands back a copy, so a caller
+  that mutates it cannot strip modes from the cycle.
+
+- **The hotkey combo was written into `hyprland.lua` unsanitised.** That file is
+  LUA: a combo carrying a quote closed the string and appended whatever followed
+  to the user's Hyprland config. A combo is only modifier and key names joined
+  by " + ", so anything outside that alphabet — including a line break — is
+  refused rather than escaped.
+
 - **The details sheet opened in the top-left corner.** It anchored below its
   anchor item, which is the toolbar button — and that button sits at the far
   left of the bar. The sheet therefore appeared under a button, in the corner,

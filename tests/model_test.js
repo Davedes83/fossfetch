@@ -64,15 +64,19 @@ eq(Model.isInsideCache("/home/u/.cache/fossfetch-evil/x.png", CACHE), false,
 eq(Model.isInsideCache("/home/u/.cache/fossfetchX/x.png", CACHE), false,
    "prefix-sharing sibling without separator is refused");
 eq(Model.isInsideCache("/etc/passwd", CACHE), false, "unrelated path is refused");
-eq(Model.isInsideCache("/home/u/.cache/fossfetch/../../etc/passwd", CACHE), true,
-   "traversal is NOT stopped here — see the note below");
+eq(Model.isInsideCache("/home/u/.cache/fossfetch/../../etc/passwd", CACHE), false,
+   "traversal out of the cache is refused, not left for URL normalisation to fix");
+eq(Model.isInsideCache("/home/u/.cache/fossfetch/icons/../../../../etc/passwd", CACHE), false,
+   "traversal from a nested cache directory is refused");
+eq(Model.isInsideCache("/home/u/.cache/fossfetch/./app.png", CACHE), false,
+   "a \".\" component is refused rather than normalised");
+eq(Model.isInsideCache(CACHE + "/deep//app.png", CACHE), false,
+   "an empty component (double slash) is refused");
+eq(Model.isInsideCache(CACHE + "/", CACHE), false,
+   "the directory with a trailing slash is not a file");
+eq(Model.isInsideCache(CACHE + "/app.png", CACHE), true,
+   "tightening the traversal check did not break a plain cache file");
 eq(Model.isInsideCache("/anything", ""), false, "no cache dir configured means nothing is inside it");
-
-// NOTE: the traversal case above passes isInsideCache but is then collapsed by
-// Image/file:// URL resolution, which normalises the path. It is asserted here
-// as documentation of the function's real contract — this function is a
-// *prefix* check, not a realpath check. If someone tightens it later, this
-// assertion is the thing that tells them the behaviour changed.
 
 // -------------------------------------------------------------------- dates
 
@@ -252,6 +256,12 @@ eq(Model.updatedKey(""), -1, "missing build date sorts last");
 // worked in Node and was undefined in the panel.
 eq(typeof Model.sortModes, "function", "sortModes is exposed as a function");
 eq(Model.sortModes().join(","), "relevance,installed,popularity,updated,name", "the cycle order is stable");
+// A COPY: mutating what came back must not rewrite the module's own list, or
+// the next caller's mode cycle loses modes for the rest of the session.
+var modes = Model.sortModes();
+modes.push("nonsense-mode");
+eq(Model.sortModes().join(","), "relevance,installed,popularity,updated,name",
+   "sortModes hands back a copy, not the live array");
 // Every mode must be handled by the sorter, and every declared mode must be one
 // sortRows actually understands.
 eq(Model.sortModes().filter(function (m) { return m !== "relevance"; })
@@ -336,6 +346,11 @@ eq(Model.rank("firefox", "ffx"), 4, "fuzzy subsequence ranks fifth");
 eq(Model.rank("firefox", "fx"), 5, "a 2-char query is too short for the fuzzy tier");
 eq(Model.rank("vlcmedia", "vlcmedia"), 0, "a longer exact name still ranks first");
 eq(Model.rank("firefox", "zzz"), 5, "an unrelated name does not match at all");
+// The needle is lowercased too, so an original-cased query ranks like a
+// lowercase one instead of falling off the end of every tier.
+eq(Model.rank("firefox", "Fire"), 1, "a mixed-case prefix query ranks as a prefix");
+eq(Model.rank("GIMP", "gimp"), 0, "a mixed-case name still matches an exact query");
+eq(Model.rank("gimp2", "GIMP 2"), 3, "punctuation stripping survives mixed case");
 
 // Fuzzy subsequence constraints.
 eq(Model.fuzzySubsequence("ab", "abacus"), false, "queries under 3 chars are rejected outright");

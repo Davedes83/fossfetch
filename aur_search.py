@@ -33,7 +33,29 @@ import urllib.request
 # name, description, version, website, license, packagebase, votes,
 # lastmodified, maintainer, outofdate (a unix timestamp, "" when current).
 QUERY_COLUMNS = 10
-MAX_BYTES = int(os.environ.get("FOSSFETCH_MAX_AUR", "8388608"))  # 8 MiB cap
+
+
+def _max_bytes():
+    """The response cap, tolerating a nonsense FOSSFETCH_MAX_AUR.
+
+    A plain int() at import time turned `FOSSFETCH_MAX_AUR=abc` into an
+    unhandled ValueError traceback and the whole search died with it. A cap is
+    a safety limit, not a setting worth failing over: a bad, empty, negative or
+    unparseable value falls back to the 8 MiB default. A non-numeric value also
+    falls back rather than being coerced, since "8388608x" is a typo, not a cap.
+    """
+    raw = os.environ.get("FOSSFETCH_MAX_AUR", "")
+    if raw.strip():
+        try:
+            v = int(raw.strip())
+        except ValueError:
+            v = 0
+        if v > 0:
+            return v
+    return 8388608  # 8 MiB
+
+
+MAX_BYTES = _max_bytes()  # 8 MiB cap unless overridden
 
 
 def fetch(query):

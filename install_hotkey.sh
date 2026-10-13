@@ -23,6 +23,33 @@ COMBO="${2:-SUPER + CTRL + SHIFT + F}"
 FILE="$DIR/hyprland.lua"
 MARK="fossfetch:hotkey"
 
+# $COMBO is written into hyprland.lua verbatim, and hyprland.lua is LUA: a combo
+# carrying a quote or a bracket closes the string and appends arbitrary code to
+# the user's config. A Hyprland combo is only ever modifier/key names joined by
+# " + ", so anything outside that alphabet is refused rather than escaped --
+# there is no legitimate combo that needs one.
+# A bracket range in a case pattern admits a newline as a member of [:space:],
+# and a newline is exactly what would smuggle a second line into the config. So
+# this trims every character a real combo may contain and requires the remainder
+# to be empty; a leftover newline, quote, bracket or semicolon all land here.
+if [ -n "$(printf '%s' "$COMBO" | tr -d 'A-Za-z0-9_+ ')" ]; then
+  echo "STATUS|bad-combo"
+  exit 0
+fi
+# tr works line by line and command substitution eats trailing newlines, so a
+# value that is two valid lines can leave nothing behind to catch. Count them:
+# a combo has no line breaks at all.
+if [ "$(printf '%s' "$COMBO" | wc -l)" -ne 0 ]; then
+  echo "STATUS|bad-combo"
+  exit 0
+fi
+# Not empty, not pure whitespace, and bounded: the longest real combo is a
+# handful of modifiers plus a key.
+if [ -z "$(printf '%s' "$COMBO" | tr -d ' ')" ] || [ "${#COMBO}" -gt 64 ]; then
+  echo "STATUS|bad-combo"
+  exit 0
+fi
+
 # Something already binds this combo to FossFetch, anywhere in the config dir.
 if grep -rqs "omarchy-shell fossfetch toggle" "$DIR" 2>/dev/null; then
   echo "STATUS|already-bound"

@@ -151,6 +151,38 @@ def open_sub(fd, rel):
     return current
 
 
+def check_rel(rel, what="path"):
+    """Reject a catalog-relative path that could climb out of the catalog.
+
+    The fd-based openers already refuse a ".."/"." component (O_NOFOLLOW plus
+    open_sub's own check), but a relative path is also passed straight to
+    os.lstat/os.unlink/os.open by name, so the NAME has to be sane before it is
+    used at all. Leading "/" and empty components are refused too: an empty
+    component means "//" or a trailing "/", neither of which names a real entry.
+    """
+    if not isinstance(rel, str) or rel == "":
+        raise OSError(errno.EINVAL, "empty %s" % what)
+    if rel.startswith("/"):
+        raise OSError(errno.EINVAL, "%s must be relative to the catalog: %r" % (what, rel))
+    for c in rel.split("/"):
+        if c in ("", ".", ".."):
+            raise OSError(errno.EINVAL, "bad %s component in %r" % (what, rel))
+    return rel
+
+
+def check_simple(name, what):
+    """A single path component: no separator, no traversal, no hidden surprise."""
+    check_rel(name, what)
+    if "/" in name:
+        raise OSError(errno.EINVAL, "%s must be a single name: %r" % (what, name))
+    return name
+
+
+def need_args(args, n, usage):
+    if len(args) < n:
+        fail("usage: appstream_state.py %s" % usage)
+
+
 def exists(fd, name):
     try:
         os.lstat(name, dir_fd=fd)
@@ -228,7 +260,13 @@ def cmd_tmpdir(args):
 
 
 def cmd_tmpfile(args):
+    need_args(args, 3, "tmpfile <cacheRoot> <ver> <prefix>")
     cache, ver, prefix = args[:3]
+    # Both names become entries inside the catalog: <ver> is opened as a
+    # directory, <prefix> as the stem of a new file. A "../" in either would
+    # land the file outside the catalog, so they are checked before any open.
+    check_simple(ver, "version")
+    check_simple(prefix, "prefix")
     store = open_catalog(cache)
     vfd = _open_at(store, ver, create=True, mode=0o700)
     _check_owned(os.fstat(vfd), ".../" + ver)
@@ -247,9 +285,11 @@ def cmd_tmpfile(args):
 
 
 def cmd_put(args):
+    need_args(args, 2, "put <cacheRoot> <rel>")
     data = sys.stdin.buffer.read()
+    # Validate before opening anything, so a bad name costs no descriptor.
+    rel = check_rel(args[1], "put path")
     store = open_catalog(args[0])
-    rel = args[1]
     if "/" in rel:
         parts = rel.rsplit("/", 1)
         sub = open_sub(store, parts[0])
@@ -266,13 +306,13 @@ def _ensure_absent(fd, name):
 
 
 def cmd_swap(args):
+    need_args(args, 3, "swap <cacheRoot> <src> <dst>")
     cache, src, dst = args[:3]
+    # Same check as the rest of the catalog operations, so swap's rule is one
+    # helper rather than a loop that can drift from the others.
+    check_rel(src, "swap source")
+    check_rel(dst, "swap destination")
     store = open_catalog(cache)
-    for part in (src, dst):
-        for c in part.split("/"):
-            if c in ("", ".", ".."):
-                os.close(store)
-                fail("bad path component in swap")
     _ensure_absent(store, src + ".old")
     if exists(store, dst):
         os.rename(dst, src + ".old", src_dir_fd=store, dst_dir_fd=store)
@@ -298,7 +338,11 @@ def cmd_swap(args):
 
 
 def cmd_rmtree(args):
+    # Missing arguments used to raise ValueError out of the tuple unpack and
+    # print a traceback; that is a usage error, so it says so and exits 1.
+    need_args(args, 2, "rmtree <cacheRoot> <rel>")
     cache, rel = args[:2]
+    check_rel(rel, "rmtree path")
     store = open_catalog(cache)
     try:
         if "/" in rel:
@@ -323,7 +367,9 @@ def cmd_rmtmp(args):
 
 
 def cmd_prune(args):
+    need_args(args, 2, "prune <cacheRoot> <keep>")
     cache, keep = args[:2]
+    check_rel(keep, "prune keep")
     store = open_catalog(cache)
     try:
         for name in os.listdir(store):
