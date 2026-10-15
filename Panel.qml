@@ -38,6 +38,18 @@ Panel {
   property int panelWidth: 560
   property int debounceMs: 150
 
+  // Panel open state — reflected from the KeyboardPanel so the BarWidget can
+  // track when the panel is actually showing. The BarWidget also reads
+  // `popoutSwitchClosing` to avoid tearing the panel down during a bar-section
+  // move, and calls `closeForPopoutSwitch()` to dismiss it cleanly.
+  property bool opened: false
+  property bool popoutSwitchClosing: false
+
+  function closeForPopoutSwitch() {
+    root.popoutSwitchClosing = true
+    root.close()
+  }
+
   readonly property var barIdentity: hostWidget || root
 
   // ------------------------------------------------------------ theme palette
@@ -387,8 +399,7 @@ readonly property bool batchArmed: root.pendingAction !== null && root.batchQueu
       root.batchActive = false
       root.clearSelection()
       root.refreshInstalled(true)
-      root.updatesAt = 0
-      root.refreshUpdates()
+      if (root.updates) root.updates.refresh()
       // The outcome is whatever the last command returned, not "done". A batch
       // containing one package that no longer exists makes pacman refuse the
       // WHOLE command before doing anything, and the terminal is gone in under
@@ -637,7 +648,6 @@ function batchPkgCount(mode) {
   }
 
   readonly property string appstreamStateScript: Qt.resolvedUrl("./appstream_state.py").toString().replace("file://", "")
-  readonly property string updateScanScript: Qt.resolvedUrl("./update_scan.sh").toString().replace("file://", "")
   readonly property string optionsFilePath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/davedes.fossfetch.json"
 
   // Hardened options write: pushes the JSON to appstream_state.py write-options,
@@ -861,6 +871,8 @@ function batchPkgCount(mode) {
     activeTab = t
     resultsList.currentIndex = -1
     rebuildResults()
+    // If switching to the Updates tab, force a fresh scan so the list is current.
+    if (root.isUpdates) root.forceFreshScan()
     // Re-assert focus WITHOUT selecting the text: the query carries across tabs,
     // and selectAll() here would wipe the search the moment you pressed Tab.
     refocus()
@@ -1499,136 +1511,45 @@ var upd = root.updateSpecFor(r)
   // background scan (update_scan.sh), which reports what each source OFFERS;
   // the panel still confirms against the installed snapshot before offering an
   // update, so a stale scan can never invent one.
-  property int updateCount: 0
-  property var updateRows: ([])
-  property double updatesAt: 0
+  // ------------------------------------------------------------- shared scan
+  // The update scan itself lives on the bar widget (UpdateScan.qml), not here.
+  // The widget is loaded at shell startup and the panel only while it is open,
+  // so a scan owned by the panel would leave the bar badge blank until the user
+  // first opened it -- and the badge exists precisely to be read while closed.
+  // `updates` is injected by the widget's loader; these bindings tolerate a
+  // null injection that has not landed yet.
+  property var updates: null
+  readonly property int updateCount: root.updates ? root.updates.updateCount : 0
+  readonly property var updateRows: root.updates ? root.updates.updateRows : []
+  readonly property var updateKeys: root.updates ? root.updates.updateKeys : ({})
 
-  function refreshUpdates() {
-    // A scan talks to three package managers, two of which may reach the
-    // network (AUR RPC / Flathub). Never let two overlap.
-    if (updateProc.running) return
-    root.updatesAt = Date.now()
-    updateProc.running = true
-  }
-
-  // One subprocess across all three sources. The helper is passed as $1 and is
-  // never interpolated into the script text. Names are read, never executed.
-  Process {
-    id: updateProc
-    running: false
-    command: ["sh", root.updateScanScript, root.aurHelper, "fossfetch-updates"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyUpdateScan(text || "")
+  // Repopulate the Updates tab when a background scan lands. The scanner owns
+  // the parsing; the panel only reacts to the rows arriving, so a scan that
+  // finished while the panel was closed is reflected the moment it opens.
+  Connections {
+    target: root.updates
+    function onUpdated() {
+      if (!root.isUpdates) return
+      // Everything got updated out from under the user: fall back to Pacman
+      // rather than leaving them on an empty tab.
+      if (root.updateCount === 0) root.switchTab(0)
+      else root.rebuildResults()
     }
   }
 
-  // A quiet periodic re-scan so the bar badge stays honest while the panel sits
-  // closed for hours. Five minutes is frequent enough that "you have updates"
-  // is never stale for long, and rare enough not to be a background daemon.
-  Timer {
-    id: updateScanTimer
-    interval: 300000
-    repeat: true
-    // Start one shortly after launch so the badge is populated on the first
-    // bar render, rather than being blank for five minutes. The panel loads at
-    // shell startup, so this is the badge's first (and only) eager scan.
-    running: true
-    triggeredOnStart: false
-    onTriggered: root.refreshUpdates()
-  }
-
-  Timer {
-    id: firstUpdateScan
-    interval: 1500
-    repeat: false
-    running: true
-    onTriggered: {
-      // Let the shell finish starting before asking three package managers
-      // questions; running it during login competes with everything else.
-      if (root.updateCount === 0) root.refreshUpdates()
+  // When the scanner is injected, push our user-configured aurHelper so the
+  // scan uses the same helper the install/remove buttons use.
+  function onUpdatesChanged() {
+    if (root.updates && root.updates.setAurHelper) {
+      root.updates.setAurHelper(root.aurHelper)
     }
   }
-
-  // Parse the "UPD|kind|name|<available>" lines into row objects the card can
-  // render. Each row carries the package key for its source so the card's
-  // existing pendingUpdate() logic recognises it and offers the Update button.
-  // Keyed by package name rather than carried as a model role: the row already
-  // identifies itself by whichever source key it has, so this needs no extra
-  // delegate property and no new ListModel role.
-  property var updateKeys: ({})
 
   function isUpdateRow(e) {
     if (!e) return false
     var k = e.pacmanPkg !== "" ? e.pacmanPkg
         : (e.aurPkg !== "" ? e.aurPkg : e.flatpakPkg)
     return k !== "" && root.updateKeys[k] === true
-  }
-
-  function applyUpdateScan(text) {
-    var rows = []
-    var keys = ({})
-    var degraded = false
-    var lines = String(text || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i]
-      // A source that could not answer is not a source with nothing to report.
-      if (line.indexOf("SCANFAIL|") === 0) { degraded = true; continue }
-      if (line.indexOf("UPD|") !== 0) continue
-      var parts = line.split("|")
-      if (parts.length < 4) continue
-      var kind = parts[1]
-      var name = parts[2]
-      var avail = parts[3]
-      if (name === "" || avail === "") continue
-      var row = {
-        name: name, description: "", version: avail, website: "", repo: "",
-        arch: "", licenses: "", updated: "", rating: "", category: "",
-        thumbnail: "", iconName: "", downloadSize: "", installedSize: "",
-        dependsOn: "", optionalDeps: "", requiredBy: "", conflictsWith: "",
-        provides: "", groups: "", packager: "", branch: "", collection: "",
-        aurVotes: "", aurMaintainer: "", aurOutdated: "", aurPopularity: "", _pkg: "",
-        pacmanPkg: "", aurPkg: "", flatpakPkg: ""
-      }
-      if (kind === "pacman") row.pacmanPkg = name
-      else if (kind === "flatpak") row.flatpakPkg = name
-      else { row.aurPkg = name; row._pkg = name }
-      keys[name] = true
-      rows.push(row)
-    }
-    // Stable, deterministic order: newest available version first is meaningless
-    // without a date, so sort by name for a list a user can scan by eye.
-    rows.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0) })
-    // A scan that could not reach a source does NOT get to say "zero updates".
-    // checkupdates fails outright while anything holds the pacman lock, which
-    // is what happens in the first seconds after a shell start; the old code
-    // turned that into a confident empty result, so the badge and the Updates
-    // tab vanished until the next five-minute tick even though updates were
-    // waiting. Keep whatever we already knew and come back shortly.
-    // A TOTAL failure keeps what we already knew: there is nothing to replace it
-    // with, and zeroing it would hide the badge and the Updates tab exactly
-    // when updates are waiting.
-    if (degraded && rows.length === 0) {
-      root.updatesDegraded = true
-      updateRetry.start()
-      return
-    }
-    // A PARTIAL scan is degraded too. pacman answered but the AUR helper was
-    // locked, say: these rows are real, but they are not the whole answer, and
-    // clearing the flag stopped the retry that would have filled in the rest.
-    // So take the rows it DID find, and stay degraded until a scan comes back
-    // with no SCANFAIL at all.
-    root.updatesDegraded = degraded
-    if (degraded) updateRetry.start()
-    else updateRetry.stop()
-    root.updateRows = rows
-    root.updateKeys = keys
-    root.updateCount = rows.length
-    // If the user is looking at the Updates tab, it is now stale — repopulate.
-    // If everything got updated out from under them, fall back to Pacman rather
-    // than leaving them on an empty tab.
-    if (root.updateCount === 0 && root.isUpdates) root.switchTab(0)
-    else if (root.isUpdates) root.rebuildResults()
   }
 
   function isPacmanInstalled(pkg) {
@@ -2828,8 +2749,7 @@ var upd = root.updateSpecFor(r)
       root.refreshInstalled(true)
       // An install or an update both change how many updates are pending, and
       // the badge is on screen whether or not the panel is open.
-      root.updatesAt = 0
-      root.refreshUpdates()
+      if (root.updates) root.updates.refresh()
       root.clipboardSuggestion()
       // Updates only, and only from here.
       //
@@ -2888,8 +2808,9 @@ var upd = root.updateSpecFor(r)
   }
 
   function open() {
+    root.popoutSwitchClosing = false
     root.controller.show()
-    root.ensureFreshScan()
+    root.forceFreshScan()
     root.detectTerminal()
     root.ensureHotkey()
     root.focusWhenShown()
@@ -2900,7 +2821,7 @@ var upd = root.updateSpecFor(r)
     // The hotkey/IPC path does NOT go through open(), so the scan has to be
     // requested here too — otherwise the badge and the Updates tab stay empty
     // until the first periodic tick, however many times the panel is opened.
-    root.ensureFreshScan()
+    root.forceFreshScan()
     root.focusWhenShown()
   }
 
@@ -2923,27 +2844,20 @@ var upd = root.updateSpecFor(r)
   // Re-scan on demand, throttled so opening the panel in a tight loop does not
   // spawn a checkupdates subprocess every time. The scan talks to three package
   // managers, two of which can reach the network, so it is never run on top of
-  // itself.
-  // True when the last scan could not reach at least one source. Kept separate
-  // from updateCount so "unknown" is never collapsed into "none".
-  property bool updatesDegraded: false
-
-  // Short retry after a degraded scan. The common cause is a transient pacman
-  // lock during startup, which clears in seconds; waiting the full five minutes
-  // would leave the badge blank for most of the session.
-  Timer {
-    id: updateRetry
-    interval: 25000
-    repeat: true
-    running: false
-    onTriggered: {
-      if (!root.updatesDegraded) { updateRetry.stop(); return }
-      root.refreshUpdates()
-    }
+  // itself. The scan and its degraded/retry state live on the widget's
+  // UpdateScan; this is only the panel's request to run one.
+  function ensureFreshScan() {
+    if (root.updates) root.updates.ensureFresh()
   }
 
-  function ensureFreshScan() {
-    if (Date.now() - root.updatesAt > 60000) root.refreshUpdates()
+  // Force an immediate scan, bypassing the 60-second throttle. Used when the
+  // panel opens or the user switches to the Updates tab so the data is current.
+  function forceFreshScan() {
+    if (root.updates && root.updates.forceRefresh) {
+      root.updates.forceRefresh()
+    } else if (root.updates) {
+      root.updates.refresh()
+    }
   }
 
   function close() {
@@ -3327,6 +3241,7 @@ property string terminalRunner: ""   // "" | "xdg" | "<name>"
     contentWidth: panel.fittedContentWidth(root.panelWidth)
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight)
     padding: Style.spacing.popupPadding
+    onOpenChanged: root.opened = open
 
     PanelKeyCatcher {
       id: keyCatcher

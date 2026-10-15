@@ -102,13 +102,11 @@ BarWidget {
   readonly property bool hot: mouseArea.containsMouse || root.opened
 
   // ---- update badge ---------------------------------------------------------
-  // The count lives on the panel (one scan, one number) and is read back here
-  // rather than re-scanned in the bar, so the badge and the Updates tab can
-  // never disagree. The panel is loaded at all times, so this stays current
-  // while the popup is closed.
-  readonly property int updateCount: panelLoader.item
-    ? (panelLoader.item.updateCount || 0)
-    : 0
+  // One scan, one number. The scan lives on `updateScanner` below (always
+  // loaded), so the badge and the Updates tab can never disagree -- and the
+  // number stays current while the popup is closed, even though the panel
+  // itself is not loaded until it is opened.
+  readonly property int updateCount: updateScanner.updateCount
 
   // 99+ rather than the real number: the badge is a nudge, not a report, and a
   // four-digit pill would blow the button's width out.
@@ -181,10 +179,21 @@ BarWidget {
   }
 
   // ------------------------------------------------------------------- panel
+  // The panel is loaded only while it is open. Its editable search field is a
+  // clipboard reader, and a field that sits in the tree in a closed shell can
+  // be made to read foreign clipboard data by another app; keeping it out of
+  // the tree until the user opens the panel removes that surface. Everything
+  // the bar shows while the panel is closed -- the update badge -- is served by
+  // `updateScanner`, not the panel, so nothing here depends on it existing.
+  property bool panelRequested: false
+  property bool pendingOpen: false
+
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
   function open() {
+    root.panelRequested = true
     if (panelLoader.item) panelLoader.item.open()
+    else root.pendingOpen = true
   }
 
   function close() {
@@ -193,11 +202,31 @@ BarWidget {
 
   function togglePanel() {
     if (panelLoader.item) panelLoader.item.toggle()
+    else root.open()
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
+
+  // Unload the panel shortly after it closes, so its search field does not sit
+  // in the tree while nothing is shown. Delayed rather than immediate so a
+  // popout switch (close, then reopen as the widget changes bar section) never
+  // tears the panel down mid-move.
+  Timer {
+    id: unloadTimer
+    interval: 400
+    repeat: false
+    onTriggered: {
+      if (!root.opened && !root.popoutSwitchClosing) root.panelRequested = false
+    }
+  }
+
+  onOpenedChanged: {
+    unloadTimer.stop()
+    if (root.opened) return
+    if (root.panelRequested) unloadTimer.restart()
   }
 
   function injectPanel() {
@@ -210,6 +239,7 @@ BarWidget {
     if ("panelWidth" in target) target.panelWidth = root.panelWidth
     if ("debounceMs" in target) target.debounceMs = root.debounceMs
     if ("palette" in target && "palette" in root) target.palette = root.palette
+    if ("updates" in target) target.updates = updateScanner
   }
 
   implicitWidth: button.width + rootHorizontalPadding * 2
@@ -221,13 +251,21 @@ BarWidget {
 
   Loader {
     id: panelLoader
-    active: true
+    // Loaded only while the panel is open (see panelRequested above).
+    active: root.panelRequested
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
+      if (root.pendingOpen) { root.pendingOpen = false; root.open() }
     }
+  }
+
+  // The background update scan, kept on the always-loaded widget so the bar
+  // badge stays live while the panel itself is unloaded.
+  UpdateScan {
+    id: updateScanner
   }
 
   // IPC bridge so the Hyprland hotkey (omarchy-shell shell toggle fossfetch)

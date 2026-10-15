@@ -41,6 +41,7 @@ PINS = os.path.join(PLUGIN, "appstream_pins.sh")
 BACKEND_PACMAN = os.path.join(PLUGIN, "backend_pacman.sh")
 BACKEND_FLATPAK = os.path.join(PLUGIN, "backend_flatpak.sh")
 UPDATE_SCAN = os.path.join(PLUGIN, "update_scan.sh")
+UPDATE_SCAN_QML = os.path.join(PLUGIN, "UpdateScan.qml")
 HOTKEY = os.path.join(PLUGIN, "install_hotkey.sh")
 
 VER = "20260101"
@@ -844,16 +845,19 @@ class FossFetchTests(unittest.TestCase):
         # line, which is the one that names the actual failure.
         self.assertIn("failed to init transaction", p.stdout, p.stdout)
 
-        with open(PANEL, encoding="utf-8") as fh:
+        with open(UPDATE_SCAN_QML, encoding="utf-8") as fh:
             src = fh.read()
-        # The panel keeps `unknown` distinct from `none`.
+        # The scan parser lives on the bar widget's UpdateScan object, not the
+        # panel: the panel loads only while open, and the badge must stay honest
+        # while it is closed, so the parse cannot depend on the panel existing.
+        # The scanner keeps `unknown` distinct from `none`.
         self.assertIn("if (degraded && rows.length === 0)", src)
-        self.assertIn("root.updatesDegraded = true", src)
+        self.assertIn("scan.updatesDegraded = true", src)
         self.assertIn("updateRetry.start()", src)
         # updateCount is only ever written by a scan that actually completed.
         guard = src[src.index("if (degraded && rows.length === 0)"):]
-        guard = guard[:guard.index("root.updateCount = rows.length")]
-        self.assertNotIn("root.updateCount = 0", guard,
+        guard = guard[:guard.index("scan.updateCount = rows.length")]
+        self.assertNotIn("scan.updateCount = 0", guard,
                          "an incomplete scan must never zero the known count")
 
     def test_aur_helper_failure_is_not_reported_as_no_updates(self):
@@ -905,13 +909,13 @@ class FossFetchTests(unittest.TestCase):
         that lost one source cleared the flag and stopped the retry, so the
         missing source never came back until the next five-minute tick.
         """
-        with open(PANEL, encoding="utf-8") as fh:
+        with open(UPDATE_SCAN_QML, encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn("root.updatesDegraded = degraded", src)
+        self.assertIn("scan.updatesDegraded = degraded", src)
         # Degraded is driven by the flag, never by "did we get rows".
-        self.assertNotIn("root.updatesDegraded = false", src)
-        guard = src[src.index("root.updatesDegraded = degraded"):]
-        guard = guard[:guard.index("root.updateCount = rows.length")]
+        self.assertNotIn("scan.updatesDegraded = false", src)
+        guard = src[src.index("scan.updatesDegraded = degraded"):]
+        guard = guard[:guard.index("scan.updateCount = rows.length")]
         self.assertIn("if (degraded) updateRetry.start()", guard)
         self.assertIn("else updateRetry.stop()", guard)
 
@@ -1607,7 +1611,7 @@ class FossFetchTests(unittest.TestCase):
         cmd = [qmllint]
         if os.path.isdir(shell_ui):
             cmd += ["-I", shell_ui]
-        cmd += [PANEL, os.path.join(PLUGIN, "BarWidget.qml")]
+        cmd += [PANEL, os.path.join(PLUGIN, "BarWidget.qml"), UPDATE_SCAN_QML]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         out = proc.stdout + proc.stderr
         # qmllint exits 0 and labels real syntax failures only as "Warning:

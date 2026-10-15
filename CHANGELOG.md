@@ -272,6 +272,13 @@ already out of date, which is the other half of what a package manager is for.
 
 - **Enter now prefers an update.** On a row with a pending update it drives the
   Update button rather than removal, which is what the row is inviting.
+- **The popup is loaded only while it is open.** Its editable search field is a
+  clipboard reader, and a search field sitting in the item tree in a closed
+  shell is one another program can make read from the clipboard. The panel is
+  created when the popup opens and released shortly after it closes. Nothing the
+  bar shows changes: the background update scan that feeds the badge moved to
+  the bar widget, which is always loaded, so the count is up to date whether or
+  not the panel has ever been opened.
 
 ### Notes
 
