@@ -41,11 +41,15 @@ Panel {
   property int panelWidth: 560
   property int debounceMs: 150
 
-  // Panel open state — reflected from the KeyboardPanel so the BarWidget can
-  // track when the panel is actually showing. The BarWidget also reads
-  // `popoutSwitchClosing` to avoid tearing the panel down during a bar-section
-  // move, and calls `closeForPopoutSwitch()` to dismiss it cleanly.
-  property bool opened: false
+  // Panel open state comes from the shell's Panel base type, which exposes
+  // `opened` as a readonly alias of its PanelController. Do NOT redeclare it
+  // here: a same-typed declaration silently shadows the base's alias with a
+  // plain property that nothing ever writes, so `controller.show()` flips the
+  // controller, the alias below never moves, KeyboardPanel.open stays false and
+  // the bar button does nothing at all — no error, no window, no log line.
+  // The BarWidget reads `opened` off this item to track the panel, and also
+  // reads `popoutSwitchClosing` to tear the panel down cleanly during a
+  // bar-section move.
   property bool popoutSwitchClosing: false
 
   function closeForPopoutSwitch() {
@@ -3276,7 +3280,9 @@ property string terminalRunner: ""   // "" | "xdg" | "<name>"
     contentWidth: panel.fittedContentWidth(root.panelWidth)
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight)
     padding: Style.spacing.popupPadding
-    onOpenChanged: root.opened = open
+    // No write-back into root.opened: it is the base type's readonly alias of
+    // the PanelController, and KeyboardPanel.close() already routes through
+    // owner.close() -> controller.hide() rather than setting its own `open`.
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -3837,10 +3843,24 @@ Icon {
               // ------------------------------------------------------- rendering
               readonly property alias hovered: searchMouse.containsMouse
 
-              // Caret band, off the same Text that renders the query, so the
+              // Caret band, off the same font the query is drawn in, so the
               // drawn caret can never drift from where the glyphs are.
+              //
+              // `positionToRectangle()` looks like the obvious way to map a
+              // character index to a pixel, but it belongs to the native
+              // editable text types this panel deliberately does not use: on a
+              // plain Text it does not exist, and every binding that called it
+              // threw "Property 'positionToRectangle' ... is not
+              // a function" on each evaluation, leaving the caret and the
+              // selection band unplaced. TextMetrics measures the prefix
+              // instead -- its advance width IS the index's x position.
+              //
+              // `advanceWidth`, not `width`: the advance is the distance the
+              // caret occupies, and it counts trailing whitespace, where
+              // `width` is the inked width and drops a trailing space. A caret
+              // after "obs " would otherwise sit a space too far left.
               readonly property real caretX:
-                searchTextItem.x + searchTextItem.positionToRectangle(caret).x
+                searchTextItem.x + caretMetrics.advanceWidth
 
               // Keep the caret inside the visible window whenever it moves or
               // the text shrinks, like the native field's auto-scroll did.
@@ -3878,14 +3898,31 @@ Icon {
                 // Horizontal scroll offset of the query window, in pixels.
                 property real viewX: 0
 
+                // Character index -> pixel offset, measured against the very
+                // font searchTextItem draws in (see caretX above for why this
+                // is not positionToRectangle).
+                TextMetrics {
+                  id: caretMetrics
+                  font: searchTextItem.font
+                  text: searchField.text.substring(0, searchField.caret)
+                }
+                TextMetrics {
+                  id: selStartMetrics
+                  font: searchTextItem.font
+                  text: searchField.text.substring(0, searchField.selStart)
+                }
+                TextMetrics {
+                  id: selEndMetrics
+                  font: searchTextItem.font
+                  text: searchField.text.substring(0, searchField.selEnd)
+                }
+
                 // Selection band, drawn under the text.
                 Rectangle {
                   visible: searchField.hasSelection
-                  x: searchTextItem.x
-                     + searchTextItem.positionToRectangle(searchField.selStart).x
+                  x: searchTextItem.x + selStartMetrics.advanceWidth
                   width: Math.max(0,
-                    searchTextItem.positionToRectangle(searchField.selEnd).x
-                    - searchTextItem.positionToRectangle(searchField.selStart).x)
+                    selEndMetrics.advanceWidth - selStartMetrics.advanceWidth)
                   y: searchTextItem.y
                   height: searchTextItem.height
                   color: Util.alpha(Color.accent, 0.35)

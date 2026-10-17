@@ -179,23 +179,17 @@ BarWidget {
   }
 
   // ------------------------------------------------------------------- panel
-  // The panel is loaded only while it is open, and unloaded again shortly
-  // after it closes. It holds no native editable text input: the query line
-  // is a key-buffered Item, and the plugin's only cross-clipboard read — the
-  // explicitly requested Ctrl+V paste — runs through a bounded child process
-  // that can neither stall nor exhaust this one (see Panel.qml). The loader
-  // still exists because a popup must not outlive its window, and everything
-  // the bar shows while the panel is closed -- the update badge -- is served
-  // by `updateScanner`, not the panel, so nothing here depends on it existing.
-  property bool panelRequested: false
-  property bool pendingOpen: false
-
+  // The panel is always loaded (see the Loader below). It holds no native
+  // editable text input: the query line is a key-buffered Item, and the
+  // plugin's only cross-clipboard read -- the explicitly requested Ctrl+V
+  // paste -- runs through a bounded child process that can neither stall nor
+  // exhaust the shared shell process (see Panel.qml). The update badge the bar
+  // shows while the panel is closed is served by `updateScanner` below, so
+  // nothing here depends on the panel's content.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
   function open() {
-    root.panelRequested = true
     if (panelLoader.item) panelLoader.item.open()
-    else root.pendingOpen = true
   }
 
   function close() {
@@ -204,31 +198,11 @@ BarWidget {
 
   function togglePanel() {
     if (panelLoader.item) panelLoader.item.toggle()
-    else root.open()
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
-  }
-
-  // Unload the panel shortly after it closes, so its search field does not sit
-  // in the tree while nothing is shown. Delayed rather than immediate so a
-  // popout switch (close, then reopen as the widget changes bar section) never
-  // tears the panel down mid-move.
-  Timer {
-    id: unloadTimer
-    interval: 400
-    repeat: false
-    onTriggered: {
-      if (!root.opened && !root.popoutSwitchClosing) root.panelRequested = false
-    }
-  }
-
-  onOpenedChanged: {
-    unloadTimer.stop()
-    if (root.opened) return
-    if (root.panelRequested) unloadTimer.restart()
   }
 
   function injectPanel() {
@@ -253,19 +227,25 @@ BarWidget {
 
   Loader {
     id: panelLoader
-    // Loaded only while the panel is open (see panelRequested above).
-    active: root.panelRequested
+    // Always loaded, deliberately. The shell's shared Panel type wires its
+    // `controller` during shell start-up; a panel first constructed from a
+    // click handler loads successfully but never finishes wiring up — its
+    // `opened` stays false, its implicit size stays 0, and controller.show()
+    // silently does nothing, so the bar button appears dead. Deferred loading
+    // was tried and reverted: with the native text field gone there is no
+    // clipboard surface left for it to keep out of the tree, and a panel that
+    // cannot open is worse than one that stays loaded.
+    active: true
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
-      if (root.pendingOpen) { root.pendingOpen = false; root.open() }
     }
   }
 
-  // The background update scan, kept on the always-loaded widget so the bar
-  // badge stays live while the panel itself is unloaded.
+  // The background update scan, kept here so the bar badge stays live whether or
+  // not the panel has ever been opened.
   UpdateScan {
     id: updateScanner
   }

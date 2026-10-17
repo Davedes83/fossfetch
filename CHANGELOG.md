@@ -112,6 +112,33 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **The bar button did nothing at all.** Clicking FossFetch did not open the
+  panel — no window, no error, nothing in the shell log. `3aad206` gave the
+  panel its own `property bool opened`, which silently shadowed the shell `Panel`
+  base type's `opened`, a readonly alias of its `PanelController`. The
+  controller was still flipped by `show()`, but nothing was listening any more,
+  so `KeyboardPanel.open` never went true and the panel sat at zero implicit
+  size. The shadowing declaration and the write-back that fed it are gone; open
+  state comes from the controller again, which is what it is for.
+
+- **The panel was built on first click instead of at start-up.** Deferring the
+  panel's construction until the bar button was pressed turned out not to
+  survive contact with the shell: a panel created outside start-up never
+  finishes wiring its controller, so `show()` did nothing even with the open
+  state fixed. The panel is loaded eagerly again. The reason for deferring it
+  was to keep a clipboard-reading surface out of the shared shell process, and
+  that surface is already gone with the native text field — see the entry below
+  — so there was nothing left to defer for.
+
+- **The query's caret and selection never appeared.** Placing the drawn caret
+  and the selection band used `positionToRectangle()`, which reads like the
+  obvious way to turn a character index into a pixel but is declared on
+  `TextInput`/`TextEdit` only. On the plain `Text` that draws the query it is
+  not a function, so each binding threw on every evaluation and both markers
+  stayed unplaced. They are measured with `TextMetrics` against the same font
+  now, using `advanceWidth` rather than `width` so a trailing space still
+  advances the caret.
+
 - **An up-to-date machine scanned forever, every 25 seconds.** `checkupdates`
   exits **2** to say "nothing pending" — that is its documented empty-update
   path, and `exit 1` is the real failure (`Cannot fetch updates`, the pacman
@@ -292,12 +319,11 @@ already out of date, which is the other half of what a package manager is for.
 
 - **Enter now prefers an update.** On a row with a pending update it drives the
   Update button rather than removal, which is what the row is inviting.
-- **The popup is loaded only while it is open.** A popup must not outlive its
-  window, and its query line is a clipboard-reading surface — see the next
-  entry. The panel is created when the popup opens and released shortly after
-  it closes. Nothing the bar shows changes: the background update scan that
-  feeds the badge moved to the bar widget, which is always loaded, so the count
-  is up to date whether or not the panel has ever been opened.
+- **The background update scan moved to the bar widget.** The badge must stay
+  live while the popup is closed, so the scan now lives on the always-loaded bar
+  widget instead of inside the panel. The count is up to date whether or not the
+  panel has ever been opened. (The panel itself is loaded eagerly again — see
+  the Fixed entries above.)
 - **The query line is no longer a native editable text field.** A maintainer
   review of the plugin's verification flagged what the loader alone could not
   fix: an editable native text item makes the Qt Wayland client treat the

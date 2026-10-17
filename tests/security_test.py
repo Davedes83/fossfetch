@@ -676,6 +676,79 @@ class FossFetchTests(unittest.TestCase):
                                  "%s must not host a native editable text input"
                                  % os.path.basename(name))
 
+    def test_panel_does_not_shadow_the_base_opened_property(self):
+        """Panel.qml must not redeclare `opened`.
+
+        The shell's Panel base type exposes `opened` as a readonly alias of its
+        PanelController, and that is the whole open/close mechanism:
+        controller.show() flips the controller, the alias follows, and
+        KeyboardPanel.open is bound to it.
+
+        A same-typed `property bool opened: false` in the derived panel
+        silently shadows that alias with a plain property nothing ever writes.
+        controller.show() then does nothing at all: the panel stays at zero
+        implicit size, the bar button appears dead, and nothing is logged. The
+        KeyboardPanel write-back (`onOpenChanged: root.opened = open`) exists
+        only to feed that dead property and cannot compile against the
+        readonly alias, so it goes too -- KeyboardPanel.close() already routes
+        through owner.close() -> controller.hide().
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("property bool opened", src,
+                         "redeclaring `opened` shadows the shell Panel's readonly "
+                         "alias and silently kills the panel's open lifecycle")
+        self.assertNotIn("root.opened =", src,
+                         "`opened` is a readonly alias of the PanelController "
+                         "and must never be assigned")
+        # The popup still has to be driven from the controller.
+        self.assertIn("open: root.opened", src,
+                      "KeyboardPanel must stay bound to the controller's state")
+        self.assertIn("root.controller.show()", src)
+
+    def test_panel_loader_is_not_deferred(self):
+        """The panel Loader must stay active, not gated on an open request.
+
+        Deferring the panel's construction until the first click was tried and
+        reverted. It does not survive contact with the shell: a panel built
+        outside shell start-up never finishes wiring its controller, so
+        controller.show() is a no-op and the button does nothing. With the
+        native text field gone there is no clipboard surface left for deferral
+        to keep out of the tree, and a panel that cannot open is worse than one
+        that stays loaded.
+        """
+        with open(BARWIDGET, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("active: true", src,
+                      "the panel Loader must be always-active")
+        for token in ("panelRequested", "pendingOpen", "unloadTimer"):
+            self.assertNotIn(token, src,
+                             "%s only existed to gate the panel Loader"
+                             % token)
+
+    def test_query_line_measures_text_without_textinput_only_apis(self):
+        """Caret and selection placement must not use TextInput-only methods.
+
+        `positionToRectangle()` reads like the obvious way to map a character
+        index to a pixel, but it is declared on TextInput/TextEdit only. Called
+        on the plain Text that draws the query it is undefined, so every
+        binding that used it threw on each evaluation and the caret and
+        selection band were left unplaced. TextMetrics measures the prefix in
+        the same font instead, using advanceWidth so a trailing space (which
+        `width` drops) still advances the caret.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Only comments may mention it, never a call.
+        code = "\n".join(line.split("//", 1)[0] for line in src.split("\n"))
+        self.assertNotIn("positionToRectangle", code,
+                         "positionToRectangle does not exist on Text; measure "
+                         "with TextMetrics instead")
+        self.assertIn("TextMetrics", src)
+        self.assertIn("caretMetrics.advanceWidth", src,
+                      "the caret must be placed from a measured prefix")
+        self.assertIn("selEndMetrics.advanceWidth", src)
+
     def test_clipboard_read_is_a_bounded_child(self):
         """The clipboard is read only through a bounded, short-lived child.
 
