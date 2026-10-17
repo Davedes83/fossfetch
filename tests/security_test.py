@@ -1081,7 +1081,30 @@ class FossFetchTests(unittest.TestCase):
         guard = src[src.index("scan.updatesDegraded = degraded"):]
         guard = guard[:guard.index("scan.updateCount = rows.length")]
         self.assertIn("if (degraded) updateRetry.start()", guard)
-        self.assertIn("else updateRetry.stop()", guard)
+        self.assertIn("updateRetry.stop()", guard)
+
+    def test_retry_backs_off_when_a_source_stays_broken(self):
+        """A source that stays broken must not be retried every 25s forever.
+
+        The retry exists for the transient pacman lock of a shell start, which
+        clears in seconds. A source that is still broken after a few retries --
+        a dead AUR helper, a missing binary, a machine that is offline -- is
+        not going to heal in 25 seconds, and retrying at that rate for the life
+        of the session re-runs the whole three-source scan every 25 seconds,
+        each pass invoking `fakeroot pacman -Sy` over the network. The interval
+        doubles up to the periodic tick instead, and a clean scan resets it.
+        """
+        with open(UPDATE_SCAN_QML, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("property int retryInterval: 25000", src,
+                      "the retry cadence must be a tunable property")
+        self.assertIn("interval: scan.retryInterval", src,
+                      "the timer must follow the backoff, not a fixed 25s")
+        self.assertIn("scan.retryInterval * 2, 300000", src,
+                      "the retry must back off, capped at the periodic tick")
+        # A healthy scan is what proves a source can come back, so it is what
+        # earns the fast cadence again.
+        self.assertIn("scan.retryInterval = 25000", src)
 
     def test_state_paths_cannot_climb_out_of_the_catalog(self):
         """rmtree/put/tmpfile validate their path, like swap already did.

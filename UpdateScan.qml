@@ -100,14 +100,25 @@ Item {
   // Short retry after a degraded scan. The common cause is a transient pacman
   // lock during startup, which clears in seconds; waiting the full five minutes
   // would leave the badge blank for most of the session.
+  //
+  // The interval backs off instead of staying at 25s. A source that is still
+  // broken after a few retries -- a dead AUR helper, a missing binary, a
+  // machine that is simply offline -- is not going to heal in 25 seconds, and
+  // retrying at that rate for the life of the session re-runs the whole
+  // three-source scan every 25 seconds, each pass invoking `fakeroot pacman
+  // -Sy` over the network. Capped at the periodic tick so a broken source
+  // costs at most one extra scan per five minutes until it comes back, and
+  // reset to 25s the moment a scan comes back clean.
+  property int retryInterval: 25000
   Timer {
     id: updateRetry
-    interval: 25000
+    interval: scan.retryInterval
     repeat: true
     running: false
     onTriggered: {
       if (!scan.updatesDegraded) { updateRetry.stop(); return }
       scan.refresh()
+      scan.retryInterval = Math.min(scan.retryInterval * 2, 300000)
     }
   }
 
@@ -212,7 +223,13 @@ Item {
     // with no SCANFAIL at all.
     scan.updatesDegraded = degraded
     if (degraded) updateRetry.start()
-    else updateRetry.stop()
+    else {
+      updateRetry.stop()
+      // A clean scan means every source answered, so the next degraded one
+      // starts the retry clock over -- the 25s cadence is for the startup
+      // lock, and it should not be remembered across a healthy scan.
+      scan.retryInterval = 25000
+    }
     scan.updateRows = rows
     scan.updateKeys = keys
     scan.updateCount = rows.length

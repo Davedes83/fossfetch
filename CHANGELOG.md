@@ -139,6 +139,16 @@ already out of date, which is the other half of what a package manager is for.
   now, using `advanceWidth` rather than `width` so a trailing space still
   advances the caret.
 
+- **A permanently-broken source stopped retrying every 25 seconds.** The
+  retry exists for the transient pacman lock of a shell start, which clears in
+  seconds — but a source that is still broken after a few retries (a dead AUR
+  helper, a missing binary, a machine that is offline) does not heal in 25
+  seconds, and retrying at that rate for the life of the session re-ran the
+  whole three-source scan every 25 seconds, each pass invoking `fakeroot
+  pacman -Sy` over the network. The interval now doubles up to the periodic
+  tick, so a broken source costs at most one extra scan per five minutes until
+  it comes back, and a clean scan resets the clock to 25s.
+
 - **An up-to-date machine scanned forever, every 25 seconds.** `checkupdates`
   exits **2** to say "nothing pending" — that is its documented empty-update
   path, and `exit 1` is the real failure (`Cannot fetch updates`, the pacman
