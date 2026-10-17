@@ -13,23 +13,32 @@ careless merge actually causes:
     fight the two-space style used throughout these files)
   * trailing whitespace
   * a missing final newline
+  * two methods of the same name declared in the same scope — QML rejects the
+    file outright ("Duplicate method name"), so the object silently fails to
+    instantiate and the widget disappears from the bar
+
+Every *.qml in the plugin root is checked by default, so a newly added file is
+covered without having to remember to register it here.
 
 Usage:  python3 tools/qml_lint.py [file.qml ...]
 Exits non-zero and prints one line per finding.
 """
 
+import glob
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.dirname(HERE)
-DEFAULT_FILES = [
-    os.path.join(PLUGIN, "Panel.qml"),
-    os.path.join(PLUGIN, "BarWidget.qml"),
-]
+DEFAULT_FILES = sorted(glob.glob(os.path.join(PLUGIN, "*.qml")))
 
 PAIRS = {"}": "{", ")": "(", "]": "["}
 OPENERS = set(PAIRS.values())
+
+# A method declaration at the start of a line. Named function *expressions*
+# inside a body are not matched by this, since they are indented further.
+METHOD_RE = re.compile(r"^(\s*)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 def check(path):
@@ -43,6 +52,35 @@ def check(path):
             problems.append("line %d: tab character" % num)
         if line != line.rstrip():
             problems.append("line %d: trailing whitespace" % num)
+
+    # Two methods of the same name in the same scope. QML rejects the whole file
+    # with "Duplicate method name", so the object fails to instantiate and its
+    # widget silently vanishes from the bar. Scope is approximated by
+    # indentation: a nested component's methods are indented further and may
+    # legitimately reuse a name from the enclosing object.
+    seen_methods = {}
+    in_block = False
+    for num, line in enumerate(src.split("\n"), 1):
+        stripped = line.strip()
+        if in_block:
+            if "*/" not in stripped:
+                continue
+            in_block = False
+            stripped = stripped.split("*/", 1)[1]
+        if stripped.startswith("/*"):
+            in_block = "*/" not in stripped[2:]
+            continue
+        if stripped.startswith("//"):
+            continue
+        match = METHOD_RE.match(line)
+        if not match:
+            continue
+        key = (len(match.group(1)), match.group(2))
+        if key in seen_methods:
+            problems.append("line %d: duplicate method '%s' (first declared at line %d)"
+                            % (num, match.group(2), seen_methods[key]))
+        else:
+            seen_methods[key] = num
 
     # Delimiter balance, skipping string literals, both comment styles, and JS
     # regex literals (which legitimately contain unbalanced brackets, e.g.

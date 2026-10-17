@@ -59,20 +59,6 @@ Item {
     if (Date.now() - scan.updatesAt > 60000) scan.refresh()
   }
 
-  function applyAurHelpers(text) {
-    var found = {}
-    var lines = String(text || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var h = lines[i].trim()
-      if (h === "paru" || h === "yay" || h === "pikaur") found[h] = true
-    }
-    scan.aurHelpersInstalled = found
-    if (scan.aurHelpersInstalled[scan.aurHelper] !== true) {
-      var preferred = ["paru", "yay", "pikaur"].filter(function (x) { return found[x] === true })
-      if (preferred.length > 0) scan.aurHelper = preferred[0]
-    }
-  }
-
   // One subprocess across all three sources. The helper is passed as $1 and is
   // never interpolated into the script text. Names are read, never executed.
   Process {

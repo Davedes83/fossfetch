@@ -112,6 +112,15 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **The bar widget failed to load, so the update badge disappeared.** Moving the
+  update scan out of the panel into the bar widget landed the file with two
+  copies of the same method in one object. QML rejects that outright, so
+  `UpdateScan` never instantiated and the widget that owns the scan was dropped
+  from the bar with nothing on screen but a line in the shell log. The duplicate
+  is gone; `tools/qml_lint.py` now checks every `*.qml` in the plugin root (the
+  new file had never been in its list) and rejects a name declared twice in the
+  same scope, which is the exact failure the QML parser reports.
+
 - **Enter did nothing on a Flatpak-only row.** The Flathub install button shows
   on any tab whenever a row carries an app id, but the keyboard path only knew
   about the pacman and AUR branches, so the card offered a button that Enter
