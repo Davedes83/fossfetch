@@ -180,9 +180,28 @@ All options persist to
 - **Keyboard-first**: `Tab` / `Shift+Tab` cycles tabs, `↑`/`↓` move the
   selection, `Enter` arms the highlighted card's install (a second press runs
   it), `F2` opens Details, `Ctrl+S` cycles the sort, `Ctrl+H` toggles Hide
-  installed, `Esc` closes, `/` refocuses the search box. `←`/`→` are left alone
-  so they edit the query like a normal text field. The bindings are listed in a
-  footer under the results rather than left to be discovered in the source.
+  installed, `Esc` closes, `/` refocuses the search box. Inside the query the
+  caret behaves like a text editor's: `←`/`→`/`Home`/`End` move it (`Shift`
+  extends a selection), `Backspace`/`Delete` cut, and `Ctrl+V` pastes. The
+  bindings are listed in a footer under the results rather than left to be
+  discovered in the source.
+- **The query line is not a native text field.** It is built from the shell's
+  own primitives — a `Text`, a drawn caret and JS key handling — because an
+  editable native text item turns the shared shell process into a clipboard
+  consumer: on the Qt 6.12.0 Wayland path, a clipboard change is read
+  synchronously, with no byte cap or overall deadline, so foreign data enters
+  the shell without any paste and one stalled or oversized provider could
+  freeze or exhaust the whole bar. The plugin instantiates none of the native
+  text-input types, so that surface does not exist; searching stays
+  keyboard-driven and IME preedit is not supported.
+- **Clipboard reads are explicit and bounded.** The plugin touches the
+  clipboard exactly twice: a speculative "offer what you copied as the query"
+  after an install/update finishes, and an explicit `Ctrl+V` paste in the
+  search box. Both run `wl-paste` as a short-lived child process whose command
+  carries the bounds in itself — `timeout` is the overall deadline and
+  `head -c` the hard byte cap — so the shell process itself never reads
+  foreign clipboard data, and a stalled or oversized provider can neither hang
+  nor exhaust it. The query line is not a native editable text field.
 - **Multi-select and batch actions**: `Space` marks the highlighted row and
   steps down, `Shift`+`↑↓` extends a range, `Ctrl+A` marks everything, and
   `Esc` puts the marks down. While anything is marked a bar appears offering

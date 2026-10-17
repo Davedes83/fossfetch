@@ -179,12 +179,14 @@ BarWidget {
   }
 
   // ------------------------------------------------------------------- panel
-  // The panel is loaded only while it is open. Its editable search field is a
-  // clipboard reader, and a field that sits in the tree in a closed shell can
-  // be made to read foreign clipboard data by another app; keeping it out of
-  // the tree until the user opens the panel removes that surface. Everything
-  // the bar shows while the panel is closed -- the update badge -- is served by
-  // `updateScanner`, not the panel, so nothing here depends on it existing.
+  // The panel is loaded only while it is open, and unloaded again shortly
+  // after it closes. It holds no native editable text input: the query line
+  // is a key-buffered Item, and the plugin's only cross-clipboard read — the
+  // explicitly requested Ctrl+V paste — runs through a bounded child process
+  // that can neither stall nor exhaust this one (see Panel.qml). The loader
+  // still exists because a popup must not outlive its window, and everything
+  // the bar shows while the panel is closed -- the update badge -- is served
+  // by `updateScanner`, not the panel, so nothing here depends on it existing.
   property bool panelRequested: false
   property bool pendingOpen: false
 

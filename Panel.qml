@@ -1,8 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
-// Aliased, not a plain import: an unaliased `import QtQuick.Controls` would
-// shadow the search box's TextField with Controls' own (different default
-// padding, background and metrics) and silently restyle it.
+// Aliased, not a plain import: Controls contributes the attached scroll-bar
+// properties only. The panel never instantiates Controls' text-input types on
+// purpose (the query line in the search box is a key-buffered Item — see that
+// block for the Wayland clipboard reason why), and the alias keeps the whole
+// text-input family out of the default namespace so an "obvious" native
+// text-field type cannot slip back into this document unnoticed.
 import QtQuick.Controls as QC
 import Quickshell
 
@@ -2948,16 +2951,48 @@ var upd = root.updateSpecFor(r)
     root.refocus()
   }
 
+  // Explicit Ctrl+V paste into the query line (searchField.pasteQuery()).
+  // This is the plugin's second and deliberate clipboard contact —
+  // read-only, asked for by the user, and the read itself lives inside the
+  // bounded child below, so foreign data never enters this process directly.
+  // The paste becomes a single line (newlines and tabs collapse to spaces: a
+  // multi-line paste into a search box is almost always accidental) with
+  // control characters dropped, and is clamped to the line's length cap.
+  function applyPaste(text) {
+    var t = String(text || "").replace(/[\r\n\t]/g, " ")
+    t = t.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    t = t.trim()
+    if (t === "") return
+    searchField.insertText(t.slice(0, searchField.maxQueryLength))
+    root.refocus()
+  }
+
+  // The clipboard read. One short-lived child serves both call sites:
+  //  * the speculative suggestion after an install/update finishes, and
+  //  * the explicit Ctrl+V paste from the query line.
+  //
+  // Foreign clipboard data is never allowed to enter this process: wl-paste
+  // is a separate process to begin with, and its command bounds the read in
+  // both directions — `timeout 2` is the overall deadline (a stalled
+  // clipboard provider cannot hang the window) and `head -c 2048` is the hard
+  // byte cap (an oversized payload ends the transfer instead of being read
+  // whole into memory). The JS side clamps what it keeps to the query line's
+  // own length cap for a paste, or 80 characters for a suggestion.
+  //
+  // -t text: without it an image sitting on the clipboard would be dumped
+  // into the collector as raw bytes and then offered as a "search term".
+  // wl-clipboard is optional — a missing binary just yields nothing.
   Process {
     id: clipProc
     running: false
-    // -t text: without it an image sitting on the clipboard would be dumped
-    // into the collector as raw bytes and then offered as a "search term".
-    // wl-clipboard is optional — a missing binary just yields nothing.
-    command: ["sh", "-c", "wl-paste -t text --no-newline 2>/dev/null || true"]
+    property bool pasteMode: false
+    command: ["sh", "-c",
+              "timeout 2 wl-paste -t text --no-newline 2>/dev/null | head -c 2048 || true"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyClipboard(text || "")
+      onStreamFinished: clipProc.pasteMode
+          ? root.applyPaste(text || "")
+          : root.applyClipboard(text || "")
     }
   }
 
@@ -3674,34 +3709,262 @@ Icon {
               width: Style.space(22)
             }
 
-            TextField {
+            // The query line. NOT a native editable text field, and not going
+            // back to one: an editable native text item makes the Qt Wayland
+            // path treat the shared shell process as a clipboard consumer —
+            // the packaged Qt 6.12.0 reads foreign clipboard text
+            // synchronously, with no byte cap and no overall deadline,
+            // whenever a clipboard is offered. In the shared shell that means
+            // it can happen without any paste, and one stalled or oversized
+            // provider can freeze or exhaust the whole bar. So this line owns
+            // its own JS buffer, drawn caret and key handling: an Item holding
+            // a Text rather than any of the native text-input types. The only
+            // clipboard read left in the plugin is the explicit Ctrl+V paste
+            // below, which runs in a short-lived child process whose command
+            // itself imposes a byte cap and a deadline (clipProc), so foreign
+            // data can neither stall this process nor stream into it.
+            Item {
               id: searchField
-              color: Color.popups.text
-              placeholderText: root.tabPlaceholder()
-              placeholderTextColor: Util.alpha(Color.popups.text, 0.45)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              anchors.verticalCenter: parent.verticalCenter
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
               anchors.left: icon.right
               anchors.leftMargin: Style.spacing.xxs
               anchors.right: parent.right
               anchors.rightMargin: Style.spacing.md
-              background: null
-              selectByMouse: true
-              onTextChanged: root.scheduleFilter()
+
+              // --------------------------------------------------- query buffer
+              // `text` is the query exactly as the user sees it, so consumers
+              // elsewhere (recents chips, clipboard suggestions,
+              // scheduleFilter) read and write it the way they read the old
+              // native field.
+              property string text: ""
+
+              // Caret and selection state are character indexes. `anchor` is
+              // the fixed end of the current selection; the derived pair is
+              // always low..high. anchor === caret means "no selection".
+              property int caret: 0
+              property int anchor: 0
+              readonly property bool hasSelection: anchor !== caret
+              readonly property int selStart: hasSelection ? Math.min(anchor, caret) : caret
+              readonly property int selEnd: hasSelection ? Math.max(anchor, caret) : caret
+
+              // Longer than this is a terminal dump, not a search query.
+              readonly property int maxQueryLength: 256
+
+              // Set while this line itself edits `text`. onTextChanged also
+              // parks the caret at the end for external writers (the record
+              // chips and the clipboard suggestion), and parking it would
+              // fight the caret an in-flight edit just computed.
+              property bool selfEdit: false
+
+              onTextChanged: {
+                if (!selfEdit) caret = anchor = text.length
+                root.scheduleFilter()
+              }
+
+              onActiveFocusChanged: if (activeFocus) searchField.restartBlink()
+
+              // --------------------------------------------------------------- edit operations
+              function selectAll() {
+                anchor = 0
+                caret = text.length
+                ensureCaretVisible()
+                restartBlink()
+              }
+
+              function moveCaret(to, extend) {
+                caret = Math.max(0, Math.min(text.length, to))
+                if (!extend) anchor = caret
+                ensureCaretVisible()
+                restartBlink()
+              }
+
+              function insertText(chars) {
+                var s = String(chars || "")
+                if (s === "") return
+                var cutAt = hasSelection ? selStart : caret
+                var cutEnd = hasSelection ? selEnd : caret
+                selfEdit = true
+                text = text.slice(0, cutAt) + s + text.slice(cutEnd)
+                selfEdit = false
+                if (text.length > maxQueryLength) {
+                  selfEdit = true
+                  text = text.slice(0, maxQueryLength)
+                  selfEdit = false
+                }
+                caret = anchor = Math.min(cutAt + s.length, text.length)
+                ensureCaretVisible()
+                restartBlink()
+              }
+
+              function deleteBackwards() {
+                if (hasSelection) { deleteSelected(); return }
+                if (caret === 0) return
+                selfEdit = true
+                text = text.slice(0, caret - 1) + text.slice(caret)
+                selfEdit = false
+                caret = anchor = caret - 1
+                restartBlink()
+              }
+
+              function deleteForwards() {
+                if (hasSelection) { deleteSelected(); return }
+                if (caret >= text.length) return
+                selfEdit = true
+                text = text.slice(0, caret) + text.slice(caret + 1)
+                selfEdit = false
+                restartBlink()
+              }
+
+              function deleteSelected() {
+                selfEdit = true
+                text = text.slice(0, selStart) + text.slice(selEnd)
+                selfEdit = false
+                caret = anchor = selStart
+                restartBlink()
+              }
+
+              // Explicit paste (Ctrl+V). The user asked for it by name; this
+              // is the plugin's only entry point into the clipboard, and the
+              // read itself happens inside clipProc — a bounded child process,
+              // never foreign data entering this process directly.
+              function pasteQuery() {
+                clipProc.pasteMode = true
+                clipProc.running = false
+                clipProc.running = true
+              }
+
+              // ------------------------------------------------------- rendering
+              readonly property alias hovered: searchMouse.containsMouse
+
+              // Caret band, off the same Text that renders the query, so the
+              // drawn caret can never drift from where the glyphs are.
+              readonly property real caretX:
+                searchTextItem.x + searchTextItem.positionToRectangle(caret).x
+
+              // Keep the caret inside the visible window whenever it moves or
+              // the text shrinks, like the native field's auto-scroll did.
+              function ensureCaretVisible() {
+                var w = searchView.width
+                if (w <= 0) return
+                var margin = Style.space(12)
+                var maxViewX = caretX - (w - margin)
+                if (maxViewX > searchView.viewX)
+                  searchView.viewX = Math.max(0, maxViewX)
+                if (caretX < searchView.viewX)
+                  searchView.viewX = Math.max(0, caretX)
+                var capX = Math.max(0, searchTextItem.implicitWidth + margin - w)
+                if (searchView.viewX > capX) searchView.viewX = capX
+              }
+
+              property bool blinkOn: true
+              Timer {
+                id: searchBlinkTimer
+                interval: 530
+                repeat: true
+                running: searchField.activeFocus
+                onTriggered: searchField.blinkOn = !searchField.blinkOn
+              }
+              function restartBlink() {
+                searchField.blinkOn = true
+                searchBlinkTimer.restart()
+              }
+
+              Item {
+                id: searchView
+                clip: true
+                anchors.fill: parent
+
+                // Horizontal scroll offset of the query window, in pixels.
+                property real viewX: 0
+
+                // Selection band, drawn under the text.
+                Rectangle {
+                  visible: searchField.hasSelection
+                  x: searchTextItem.x
+                     + searchTextItem.positionToRectangle(searchField.selStart).x
+                  width: Math.max(0,
+                    searchTextItem.positionToRectangle(searchField.selEnd).x
+                    - searchTextItem.positionToRectangle(searchField.selStart).x)
+                  y: searchTextItem.y
+                  height: searchTextItem.height
+                  color: Util.alpha(Color.accent, 0.35)
+                }
+
+                Text {
+                  visible: searchField.text === ""
+                  x: -searchView.viewX
+                  text: root.tabPlaceholder()
+                  color: Util.alpha(Color.popups.text, 0.45)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  id: searchTextItem
+                  visible: searchField.text !== ""
+                  x: -searchView.viewX
+                  text: searchField.text
+                  color: Color.popups.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  textFormat: Text.PlainText
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Rectangle {
+                  visible: searchField.activeFocus && searchField.blinkOn
+                           && !searchField.hasSelection
+                  x: searchField.caretX
+                  y: searchTextItem.y
+                  width: 2
+                  height: searchTextItem.height
+                  color: Color.accent
+                }
+              }
+
+              MouseArea {
+                id: searchMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.IBeamCursor
+                onClicked: function(mouse) {
+                  searchField.forceActiveFocus()
+                  searchField.moveCaret(searchField.caretAt(mouse.x + searchView.viewX), false)
+                  searchField.restartBlink()
+                }
+                onDoubleClicked: {
+                  searchField.forceActiveFocus()
+                  searchField.selectAll()
+                }
+              }
+
+              function caretAt(x) {
+                return Math.max(0, Math.min(text.length,
+                       searchTextItem.positionAt(x, searchTextItem.height / 2)))
+              }
 
               // One Keys.onPressed rather than per-key handlers: Qt skips the
               // generic `pressed` signal whenever a specific key signal is
               // connected, so mixing onUpPressed with onPressed would silently
               // starve the generic branch.
               //
-              // Left/Right are deliberately NOT handled — they are the text caret.
-              // (They used to be hijacked for tab switching, which made it
-              // impossible to edit a query in the middle.)
+              // PanelKeyCatcher is `blocked` while this line has focus, so the
+              // panel-level handlers never see these keys, and the panel cursor
+              // keys are forwarded here by hand — verbatim from the branch list
+              // the native field ran, so none of the panel behaviour changed.
               //
-              // Tab/Backtab/Escape are handled here because PanelKeyCatcher is
-              // `blocked` whenever this field has focus, so the panel-level
-              // handlers never see them.
+              // The caret keys now belong to this line too: ←/→/Home/End move
+              // the drawn caret (Shift extends the selection), Backspace and
+              // Delete cut at it, and printable keys spell the query. Ctrl+V
+              // pastes explicitly — the plugin's only clipboard read, bounded
+              // inside clipProc's child process.
+              //
+              // Text keys remember one booking rule: Space is a row toggle, so
+              // it never lands in the query — exactly as on the native field,
+              // whose handler consumed it before the text caret could see it.
               Keys.onPressed: function(event) {
                 // The confirm dialog owns Escape / Tab / Enter while it is up.
                 // It exposes handleKey() rather than grabbing focus itself, so
@@ -3792,6 +4055,35 @@ Icon {
                   event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                   root.activateCursor()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_V && (event.modifiers & Qt.ControlModifier)) {
+                  searchField.pasteQuery()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Backspace) {
+                  searchField.deleteBackwards()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Delete) {
+                  searchField.deleteForwards()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Left) {
+                  searchField.moveCaret(searchField.caret - 1, event.modifiers & Qt.ShiftModifier)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Right) {
+                  searchField.moveCaret(searchField.caret + 1, event.modifiers & Qt.ShiftModifier)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Home) {
+                  searchField.moveCaret(0, event.modifiers & Qt.ShiftModifier)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_End) {
+                  searchField.moveCaret(searchField.text.length, event.modifiers & Qt.ShiftModifier)
+                  event.accepted = true
+                } else if (event.text.length === 1 && event.text.charCodeAt(0) >= 0x20
+                           && !(event.modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.AltModifier))) {
+                  // Everything that spells the query: letters, digits,
+                  // punctuation, dead-key results. The clipboard-history combo
+                  // (Ctrl+V above) was caught earlier, and Ctrl/Alt chords are
+                  // panel shortcuts or nothing — none of them are query text.
+                  searchField.insertText(event.text)
                   event.accepted = true
                 }
               }

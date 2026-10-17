@@ -272,13 +272,31 @@ already out of date, which is the other half of what a package manager is for.
 
 - **Enter now prefers an update.** On a row with a pending update it drives the
   Update button rather than removal, which is what the row is inviting.
-- **The popup is loaded only while it is open.** Its editable search field is a
-  clipboard reader, and a search field sitting in the item tree in a closed
-  shell is one another program can make read from the clipboard. The panel is
-  created when the popup opens and released shortly after it closes. Nothing the
-  bar shows changes: the background update scan that feeds the badge moved to
-  the bar widget, which is always loaded, so the count is up to date whether or
-  not the panel has ever been opened.
+- **The popup is loaded only while it is open.** A popup must not outlive its
+  window, and its query line is a clipboard-reading surface — see the next
+  entry. The panel is created when the popup opens and released shortly after
+  it closes. Nothing the bar shows changes: the background update scan that
+  feeds the badge moved to the bar widget, which is always loaded, so the count
+  is up to date whether or not the panel has ever been opened.
+- **The query line is no longer a native editable text field.** A maintainer
+  review of the plugin's verification flagged what the loader alone could not
+  fix: an editable native text item makes the Qt Wayland client treat the
+  shell as a clipboard consumer, and on the packaged Qt 6.12.0 a clipboard
+  change is read synchronously inside the shared shell process — foreign text,
+  no byte cap, no overall deadline, without a paste. One stalled or oversized
+  provider can freeze or exhaust the whole bar. The query line is now built
+  from the shell's own primitives: a JS buffer, a drawn caret and
+  hand-forwarded key handling, with the same editing keys as before —
+  `←`/`→`/`Home`/`End` (with `Shift` they select), `Backspace` and `Delete`
+  cut, `Ctrl+V` pastes. `Space` still marks the highlighted row rather than
+  typing a gap: package names and app ids do not carry spaces.
+- **Every clipboard read is explicit and bounded.** The only two are the
+  speculative "offer what you just copied as the query" after an action
+  finishes, and the explicit `Ctrl+V` paste. Both run `wl-paste` as a
+  short-lived child process whose command carries the bounds in itself —
+  `timeout` is the overall deadline, `head -c` the hard byte cap — so the
+  shell process itself never touches foreign clipboard data, and a stalled or
+  oversized provider can neither hang the window nor stream data into it.
 
 ### Notes
 

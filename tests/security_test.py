@@ -655,6 +655,55 @@ class FossFetchTests(unittest.TestCase):
                         fbody.find("optionsWriter.running = false"),
                         "stdin must be reopened before the helper is restarted")
 
+    # ------------------------------------------------- native editable inputs
+    def test_no_native_editable_text_input(self):
+        """The query line must not be a native editable text input.
+
+        An editable native text item makes the Qt Wayland path treat the
+        shared shell process as a clipboard consumer: on the packaged Qt
+        6.12.0, a clipboard change is read synchronously inside the shell —
+        foreign text, no byte cap, no overall deadline, without any paste
+        (the review hold that drove this). The plugin is built from a
+        key-buffered Item instead; none of the native text-input types may
+        come back by accident.
+        """
+        for name in (PANEL, BARWIDGET, UPDATE_SCAN_QML):
+            with open(name, encoding="utf-8") as fh:
+                src = fh.read()
+            for token in ("TextField", "TextArea", "TextEdit", "TextInput",
+                          "selectByMouse"):
+                self.assertNotIn(token, src,
+                                 "%s must not host a native editable text input"
+                                 % os.path.basename(name))
+
+    def test_clipboard_read_is_a_bounded_child(self):
+        """The clipboard is read only through a bounded, short-lived child.
+
+        `wl-paste` runs in a separate process, and the command carries the
+        bounds in itself: `timeout` as the overall deadline (a stalled
+        provider cannot hang the window) and `head -c` as the hard byte cap
+        (an oversized payload stops the transfer instead of being read whole
+        into memory). And the only in-QML entry point is an explicit paste —
+        the clipboard must never be read by QML state changes alone.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertRegex(
+            src,
+            r'"timeout \d+ wl-paste[^\n"]*head -c \d+')
+        # The command itself must carry both bounds: a deadline (`timeout`)
+        # and a byte cap (`head -c`). A read that misses either is the
+        # unbounded surface the review held on.
+        # The read has exactly two callers: the explicit paste path and the
+        # speculative suggestion. Both type check through the same intent
+        # flags, and nothing else starts the child.
+        self.assertIn("function pasteQuery()", src)
+        self.assertIn("pasteMode", src)
+        clip_start = src.index("Process {\n    id: clipProc")
+        guard = src[clip_start:src.index("onOpenedChanged")]
+        self.assertNotIn("running: true,", guard,
+                         "clipProc must never run on its own")
+
     # ------------------------------------------------------------ pin sanity
     def test_pins_wellformed_and_used_slots_distinct(self):
         # The pin array IS the trust anchor for the network download path, so a
