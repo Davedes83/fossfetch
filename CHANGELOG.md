@@ -112,6 +112,17 @@ already out of date, which is the other half of what a package manager is for.
 
 ### Fixed
 
+- **An up-to-date machine scanned forever, every 25 seconds.** `checkupdates`
+  exits **2** to say "nothing pending" — that is its documented empty-update
+  path, and `exit 1` is the real failure (`Cannot fetch updates`, the pacman
+  lock). Reading 2 as a failure marked the scan degraded on every machine that
+  was simply up to date, which is most of them most of the time. Worse, a
+  degraded scan arms a 25-second retry, so a fully updated system ran the whole
+  three-source scan forever — every 25 seconds, each pass invoking
+  `fakeroot pacman -Sy` against the network. Exit 2 is now the healthy no-news
+  result; exit 1 still reports as a failure and still arms the retry, which is
+  what that timer is for.
+
 - **The bar widget failed to load, so the update badge disappeared.** Moving the
   update scan out of the panel into the bar widget landed the file with two
   copies of the same method in one object. QML rejects that outright, so

@@ -38,7 +38,16 @@ if command -v checkupdates >/dev/null 2>&1; then
   # the next five-minute tick.
   cu_out=$(checkupdates 2>&1)
   cu_rc=$?
-  if [ "$cu_rc" -ne 0 ]; then
+  # Exit 2 is NOT a failure: `checkupdates` only reaches it from its empty
+  # branch (the `else` of `if (( ${#updates[@]} ))`, the last lines of
+  # /usr/bin/checkupdates), which is how it says "your system is up to date".
+  # A real failure is 1, from `die 'Cannot fetch updates'` — the pacman lock.
+  #
+  # Reading 2 as failure made the common case wrong: an up-to-date machine, which
+  # is most machines most of the time, reported degraded forever, and the panel
+  # kept that state by retrying the whole three-source scan every 25 seconds,
+  # indefinitely — each retry running `fakeroot pacman -Sy` over the network.
+  if [ "$cu_rc" -ne 0 ] && [ "$cu_rc" -ne 2 ]; then
     cu_reason=$(printf '%s\n' "$cu_out" | grep -m1 -i "error\|lock\|failed" | cut -c1-120)
     [ -n "$cu_reason" ] || cu_reason="exit $cu_rc"
     echo "SCANFAIL|checkupdates|$cu_reason"

@@ -909,6 +909,48 @@ class FossFetchTests(unittest.TestCase):
         self.assertNotIn("scan.updateCount = 0", guard,
                          "an incomplete scan must never zero the known count")
 
+    def test_checkupdates_exit_two_is_not_a_failure(self):
+        """`checkupdates` uses exit 2 to say "up to date", not "failed".
+
+        /usr/bin/checkupdates only reaches `exit 2` from the `else` branch of
+        `if (( ${#updates[@]} ))` -- the empty-update case. A genuine failure is
+        1, from `die 'Cannot fetch updates'`.
+
+        Treating 2 as a failure made the ordinary case look broken: a machine
+        with nothing pending (most machines, most of the time) reported
+        `SCANFAIL|checkupdates|exit 2` and `STATUS|degraded`, so the panel showed
+        a degraded scan it could never clear. It also kept `updateRetry` armed,
+        re-running the whole three-source scan every 25 seconds forever, each
+        pass invoking `fakeroot pacman -Sy` against the network.
+        """
+        # "No updates" is exit 2 with empty output: no SCANFAIL, clean STATUS.
+        path = self.fake_bin("checkupdates", "exit 2\n")
+        self.fake_bin("yay", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertNotIn("SCANFAIL|", p.stdout, p.stdout)
+        self.assertIn("STATUS|ok|updates", p.stdout, p.stdout)
+        self.assertNotIn("UPD|", p.stdout, p.stdout)
+
+        # Exit 1 is still a failure -- the lock case the retry exists for.
+        path = self.fake_bin("checkupdates",
+                             'echo "error: failed to init transaction" >&2\nexit 1\n')
+        self.fake_bin("yay", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertIn("SCANFAIL|checkupdates", p.stdout, p.stdout)
+        self.assertIn("STATUS|degraded|updates", p.stdout, p.stdout)
+
+        # Exit 2 with output is not a thing, but if it ever happened the rows
+        # must still be honoured rather than dropped by the success path.
+        path = self.fake_bin("checkupdates",
+                             'echo "git 2.40-1 -> 2.41-1"\nexit 2\n')
+        self.fake_bin("yay", "exit 0\n")
+        self.fake_bin("flatpak", "exit 0\n")
+        p = self.run_backend(UPDATE_SCAN, ["yay"], path=path)
+        self.assertIn("UPD|pacman|git|2.41-1", p.stdout, p.stdout)
+        self.assertNotIn("SCANFAIL|", p.stdout, p.stdout)
+
     def test_aur_helper_failure_is_not_reported_as_no_updates(self):
         """A failing AUR helper is a failed source, exactly like checkupdates.
 
