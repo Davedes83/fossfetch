@@ -354,6 +354,28 @@ already out of date, which is the other half of what a package manager is for.
   shell process itself never touches foreign clipboard data, and a stalled or
   oversized provider can neither hang the window nor stream data into it.
 
+### Security
+
+- **The support button no longer fetches anything into the shell.** It was the
+  hosted `kofi5.png`, loaded by an `Image` from `storage.ko-fi.com` on every
+  panel load, decoded inside the shared shell process alongside the bar, the
+  dock and every other plugin. The URL is mutable by whoever answers for that
+  host, so the bytes were not this plugin's to vouch for, and the 138×30
+  `sourceSize` only bounds the pixel grid Qt scales *to* — not the ancillary
+  text chunks libpng reads and retains *before* that scaling. A small-pixel PNG
+  carrying a large volume of individually permitted compressed text metadata
+  would have been held in shared shell memory with no bound this panel
+  controls, which is the same class of unbounded foreign input the query line
+  and the clipboard reads were already reworked for: a third party able to
+  stall or exhaust the whole desktop rather than just its own corner of it.
+
+  The button is drawn instead — a `Rectangle`, a cup made of two more, and two
+  `Text` items, themed from `Color.popups.text` and `Color.accent` like every
+  other control in the panel. Nothing is decoded, nothing is cached, and there
+  is no asset for anyone to swap between two launches. Clicking it still opens
+  `ko-fi.com/davedes` in the user's own browser; that is the only network
+  request the button makes, and it leaves the machine.
+
 ### Notes
 
 - Version comparison follows pacman's scheme (epochs, pkgrel, numeric segment

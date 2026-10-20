@@ -3634,26 +3634,86 @@ Icon {
               }
             }
 
-            // Buy Me a Coffee — ko-fi flavored; same button used in the mouse & keybind app.
+            // Buy Me a Coffee — drawn, not fetched.
+            //
+            // This was the hosted kofi5.png, loaded from storage.ko-fi.com by an
+            // Image inside the shell process. That is a mutable third-party URL:
+            // whoever answers for it decides the bytes the shell decodes on every
+            // launch, and the 138x30 sourceSize only bounds the pixel grid Qt
+            // scales to — not the ancillary text chunks libpng expands and keeps
+            // before that scaling happens. A small-pixel file carrying a lot of
+            // compressed metadata would therefore have been retained in shared
+            // shell memory with no bound this panel controls. The button is now a
+            // Rectangle, a drawn cup and two Text items, so what reaches the
+            // screen is the code in this file; the only request it makes of the
+            // network is the one that leaves when you click it.
             BorderSurface {
               id: buyButton
               visible: root.showCoffeeButton
               x: (parent.width - width) / 2
-              implicitWidth: koFiImg.sourceSize.width + Style.space(10)
-              implicitHeight: koFiImg.sourceSize.height + Style.space(6)
+              implicitWidth: buyRow.implicitWidth + Style.space(24)
+              implicitHeight: Style.space(30)
               radius: Style.cornerRadius
-              color: "transparent"
+              color: buyHover.containsMouse
+                ? Style.hoverFillFor(Color.popups.text, Color.accent)
+                : "transparent"
               Behavior on color { ColorAnimation { duration: 150 } }
 
-              Image {
-                id: koFiImg
+              Row {
+                id: buyRow
                 anchors.centerIn: parent
-                source: "https://storage.ko-fi.com/cdn/kofi5.png?v=6"
-                sourceSize.width: 138
-                sourceSize.height: 30
-                fillMode: Image.PreserveAspectFit
-                mipmap: true
-                smooth: true
+                spacing: Style.space(8)
+
+                // The cup — a body and a handle, both plain Rectangles. The
+                // body is declared last so it paints over the handle's left
+                // half, which is what makes the ring read as a handle.
+                Item {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: cupBody.width + cupHandle.width / 2
+                  height: Style.space(18)
+
+                  Rectangle {
+                    id: cupHandle
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(11)
+                    height: Style.space(13)
+                    radius: width / 2
+                    color: "transparent"
+                    border.width: Math.max(1, Style.space(2))
+                    border.color: Color.accent
+                  }
+
+                  Rectangle {
+                    id: cupBody
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(15)
+                    height: Style.space(12)
+                    radius: Math.max(2, Style.space(3))
+                    color: Color.accent
+                  }
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(18)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Support on Ko-fi"
+                  color: Color.popups.text
+                  textFormat: Text.PlainText
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Icon {
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(18)
+                  text: root.icons.external
+                  iconSize: Style.font.caption
+                  tint: 0.6
+                }
               }
 
               MouseArea {

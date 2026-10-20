@@ -117,6 +117,55 @@ class FixtureServer:
         self.thread.join(timeout=5)
 
 
+def qml_code(src):
+    """Panel.qml with its comments removed and its string literals kept whole.
+
+    Written as a scanner rather than a pair of regular expressions because the
+    assertions that use it are looking FOR strings containing `//` -- a naive
+    `re.sub(r"//[^\\n]*", ...)` deletes everything after the first slash on the
+    line, including `https://host/thing.png` inside a literal, and would hand
+    the test a clean pass on exactly the regression it exists to catch.
+    """
+    out = []
+    i, n = 0, len(src)
+    in_block = False
+    in_str = ""
+    while i < n:
+        c = src[i]
+        two = src[i:i + 2]
+        if in_block:
+            # Block comments are dropped whole, so `//` and quotes inside one
+            # never reach the rest of the scan.
+            if two == "*/":
+                in_block = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if in_str:
+            if c == "\\":
+                i += 2          # keep the escaped char and whatever follows
+                continue
+            if c == in_str:
+                in_str = ""
+            out.append(c)
+            i += 1
+            continue
+        if two == "/*":
+            in_block = True
+            i += 2
+            continue
+        if two == "//":
+            while i < n and src[i] != "\n":
+                i += 1          # line comment: drop to end of line, keep the \n
+            continue
+        if c == '"' or c == "'":
+            in_str = c
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def sha256(b):
     import hashlib
     return hashlib.sha256(b).hexdigest()
@@ -2334,6 +2383,50 @@ class FossFetchTests(unittest.TestCase):
         self.assertIn("root.persistOptions()", arm)
         # Still a plain checkbox: no modal, nothing the user cannot dismiss.
         self.assertIn("property bool showCoffeeButton: true", src)
+
+    def test_the_support_button_fetches_nothing_at_runtime(self):
+        """The support button may not pull bytes off the network into the shell.
+
+        It used to be the hosted kofi5.png, loaded by an Image from
+        storage.ko-fi.com on every panel load and decoded inside the shared
+        shell process. Two things made that the panel's problem rather than
+        Ko-fi's: the URL is mutable, so whoever answers for that host decides
+        the bytes the shell decodes, and sourceSize only caps the pixel grid
+        Qt scales TO -- not the ancillary text chunks libpng expands and keeps
+        BEFORE that scaling, so a small-pixel file could have parked an
+        unbounded amount of compressed metadata in shared shell memory. That is
+        the same shape of finding as the query line and the clipboard reads: a
+        third party able to stall or exhaust the whole desktop rather than its
+        own corner of it.
+
+        The button is drawn from QML now, which is what this test holds in
+        place -- the guarantee is the absence of the asset, not the presence of
+        any particular replacement.
+        """
+        with open(PANEL, encoding="utf-8") as fh:
+            src = fh.read()
+        # Comments are stripped first: the history of what this button used to
+        # be is worth writing down in the QML, and a test that banned the
+        # strings outright would make that impossible. Only the code has to be
+        # clean of them.
+        code = qml_code(src)
+        self.assertNotIn("storage.ko-fi.com", code)
+        self.assertNotIn("kofi5.png", code)
+        # It is still there and still opens the same link; only the artwork
+        # changed hands.
+        self.assertIn("Support on Ko-fi", code)
+        self.assertIn("Qt.openUrlExternally(\"https://ko-fi.com/davedes\")", code)
+        # No Image in the panel may name a network URL in its source binding.
+        # resolveThumb() still RETURNS one, for catalog-supplied thumbnails,
+        # but it builds it from data -- so the rule is that no image the panel
+        # draws unconditionally may depend on a host this plugin does not
+        # control. Checked per binding rather than by counting Image blocks,
+        # because the block that regresses will not be the one you expect.
+        for ln in code.splitlines():
+            if "source:" not in ln:
+                continue
+            self.assertNotIn("http", ln,
+                             "hard-coded network image source: %s" % ln.strip())
 
     def test_five_toolbar_styles_are_offered_and_distinct(self):
         with open(PANEL, encoding="utf-8") as fh:
