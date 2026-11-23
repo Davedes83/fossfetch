@@ -50,6 +50,18 @@
         "label": "Bar button label",
         "defaultValue": "Find App",
         "description": "Text on the bar pill. Hidden when the toolbar design is 'icon'."
+      },
+      {
+        "key": "density",
+        "type": "enum",
+        "label": "Result density",
+        "options": [
+          { "value": "compact", "label": "Compact" },
+          { "value": "cozy", "label": "Cozy" },
+          { "value": "spacious", "label": "Spacious" }
+        ],
+        "defaultValue": "cozy",
+        "description": "Vertical density of result cards. Compact = more rows, Spacious = more breathing room."
       }
     ],
     "aliases": [

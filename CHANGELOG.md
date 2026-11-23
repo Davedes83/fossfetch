@@ -385,6 +385,36 @@ already out of date, which is the other half of what a package manager is for.
 - The Updates tab hides Install and Remove. The tab exists to update things,
   and offering Remove beside Update invites a mis-click.
 
+### Added
+
+- **A Categories sidebar** (`Ctrl+B`, or the palette button beside Settings).
+  It lists the same groups the search backends already tag packages with, has
+  its own filter, and selecting a category fills the search field with that
+  group's keyword and runs the search — the same path a typed query takes.
+  The sidebar state is persisted with the other options.
+- **Flatpak permission chips** on Flatpak results, read from Flathub metadata,
+  so the permissions an app asks for are visible before installing it.
+- **Result density** (`Compact` / `Cozy` / `Spacious`) in Options. Compact shows
+  more rows, Spacious gives each card more room; the choice is persisted.
+- **An "Update all" action** on the Updates tab, using the existing batch
+  runner rather than launching one command per package.
+
+### Fixed
+
+- **Live search could report "Offline" on a working connection.** Detection
+  used ICMP pings to public DNS resolvers, which many networks block while
+  HTTPS to the package sources works fine. It now probes TCP/443 against the
+  endpoints the backends actually use, and requires two consecutive failures
+  before declaring the machine offline.
+- **Selecting a category did nothing.** The handler assigned `root.query`
+  directly, but the debounced filter re-reads the search field and overwrote
+  that value with the still-blank field a moment later. The category now writes
+  to the search field, so the keyword survives and the search actually runs.
+- **The X in the Categories sidebar did not close it.** That button cleared
+  the filter instead, so with an empty filter the click did nothing. It now
+  closes the sidebar; filter clearing has its own button that appears only
+  while a filter is active.
+
 ## [1.1.1] — unreleased
 
 A visual pass over the whole panel. Nothing about what FossFetch does changed;

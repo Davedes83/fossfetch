@@ -22,6 +22,7 @@ import qs.Ui
 // the only form QML accepts for a JS resource (`.import "..." as` is a syntax
 // error, and it fails the WHOLE file — the panel then silently never opens).
 import "Model.js" as Model
+import "CategoryModel.js" as CategoryModel
 
 // FossFetch browse panel. Three search-driven tabs list FOSS apps — Pacman
 // (Arch repos), Flatpak (Flathub) and AUR (Yay/Paru) — each with one-click
@@ -189,6 +190,12 @@ Panel {
   readonly property string supportPromptEpoch: "2026-10-12a"
   property bool showOptions: false
 
+  // Categories sidebar state (persisted)
+  property bool categorySidebarOpen: false
+
+  // Result density setting (persisted): compact, cozy, spacious
+  property string density: "cozy"
+
   // ------------------------------------------------------------ result view
   // How the result list is ordered, and whether packages you already have are
   // hidden. Both are persisted with the other options so a user who sorts by
@@ -201,6 +208,13 @@ Panel {
   readonly property var sortModes: Model.sortModes()
   property string sortMode: "relevance"
   property bool hideInstalled: false
+
+  // Offline mode detection
+  property bool isOffline: false
+  property int offlineCheckInterval: 30000  // Check every 30 seconds
+  // Require two consecutive failed probes before declaring offline, so a
+  // single dropped packet cannot kill live search for 30 seconds.
+  property int offlineFailCount: 0
 
   // Monotonic counter behind each row's insertion order. Relevance sorting is
   // "put them back the way the backend ranked them", which needs the original
@@ -634,6 +648,13 @@ function batchPkgCount(mode) {
     root.persistOptions()
   }
 
+  function setDensity(d) {
+    if (d === "compact" || d === "cozy" || d === "spacious") {
+      root.density = d
+      root.persistOptions()
+    }
+  }
+
   // ---------------------------------------------------- toolbar icon design
   // Visual style applied to the "Find App" pill in the top bar. One of:
   // current | outline | soft | bold | minimal | icon. The panel itself keeps
@@ -743,6 +764,46 @@ function batchPkgCount(mode) {
     onTriggered: root.flushRecent()
   }
 
+  // Offline detection: ping a reliable host to check connectivity
+  Timer {
+    id: offlineCheckTimer
+    interval: root.offlineCheckInterval
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: root.checkOnline()
+  }
+
+  readonly property string checkOnlineScript: Qt.resolvedUrl("./check_online.py").toString().replace("file://", "")
+
+  function checkOnline() {
+    offlineCheckProc.command = ["python3", root.checkOnlineScript]
+    offlineCheckProc.running = false
+    offlineCheckProc.running = true
+  }
+
+  Process {
+    id: offlineCheckProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      // Don't handle result here - use onExited instead
+    }
+    onExited: function(code) {
+      if (code === 0) {
+        root.offlineFailCount = 0
+        if (root.isOffline) {
+          root.isOffline = false
+          if (root.query !== "") root.scheduleFilter()
+        }
+      } else {
+        root.offlineFailCount++
+        if (root.offlineFailCount >= 2 && !root.isOffline) {
+          root.isOffline = true
+        }
+      }
+    }
+  }
+
   function rememberSearch(q) {
     var term = String(q || "").trim().toLowerCase()
     // One or two characters produce a flood of useless recents.
@@ -776,7 +837,9 @@ function batchPkgCount(mode) {
       hotkeyInstalled: root.hotkeyInstalled,
       sortMode: root.sortMode,
       hideInstalled: root.hideInstalled,
-      recentSearches: root.recentSearches
+      recentSearches: root.recentSearches,
+      categorySidebarOpen: root.categorySidebarOpen,
+      density: root.density
     }, null, 2) + "\n"
     optionsWriter.command = ["python3", root.appstreamStateScript, "write-options", root.optionsFilePath]
     // Reopen the write channel for this run: onStarted closes it again to hand
@@ -839,6 +902,8 @@ function batchPkgCount(mode) {
           }
           root.recentSearches = clean
         }
+        if (typeof data.categorySidebarOpen === "boolean") root.categorySidebarOpen = data.categorySidebarOpen
+        if (data.density === "compact" || data.density === "cozy" || data.density === "spacious") root.density = data.density
         if (root.hostWidget && root.hostWidget.setToolbarDesign)
           root.hostWidget.setToolbarDesign(root.panelDesign)
       } catch (e) { console.warn("[fossfetch] options load failed:", e) }
@@ -953,8 +1018,15 @@ function batchPkgCount(mode) {
   // never past what fits between the bar and the screen edge, so the card
   // can't overlap the bottom of the bar / off-screen. The ListView scrolls
   // internally when there are more matches than fit.
-  // Fixed card height so exactly 3 result cards are on screen at a time.
-  readonly property real cardHeight: Style.space(150)
+  // Card height varies by density setting: compact=110, cozy=150, spacious=190
+  readonly property real densityCompact: Style.space(110)
+  readonly property real densityCozy: Style.space(150)
+  readonly property real densitySpacious: Style.space(190)
+  readonly property real cardHeight: {
+      if (root.density === "compact") return root.densityCompact;
+      if (root.density === "spacious") return root.densitySpacious;
+      return root.densityCozy;
+    }
   function fitResultsHeight(count) {
     if (count <= 0) return Style.space(120)
     var spacing = Style.space(8)
@@ -1048,6 +1120,29 @@ function batchPkgCount(mode) {
     if (pop) chips.push(pop)
     var when = root.fmtUpdated((e && e.updated) || "")
     if (when !== "") chips.push({ label: "Updated", value: when })
+    // Flatpak permission chips (prepend for visibility)
+    var permChips = root.flatpakPermChips(e)
+    if (permChips && permChips.length > 0) {
+      // Prepend so they appear first (most visible)
+      chips = permChips.concat(chips)
+    }
+    return chips
+  }
+
+  // Parse flatpakPerms JSON and return chip objects
+  function flatpakPermChips(e) {
+    if (!e || e.flatpakPkg === "") return []
+    var perms = e.flatpakPerms
+    if (!perms || perms === "") return []
+    var chips = []
+    try {
+      var arr = JSON.parse(perms)
+      for (var i = 0; i < arr.length; i++) {
+        if (Array.isArray(arr[i]) && arr[i].length >= 2) {
+          chips.push({ label: arr[i][1], value: arr[i][0], isPerm: true })
+        }
+      }
+    } catch (err) {}
     return chips
   }
 
@@ -1235,6 +1330,69 @@ var upd = root.updateSpecFor(r)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyFlatpakInfo(text || "")
+    }
+  }
+
+  // ---------------------------------------------- flatpak permissions
+  readonly property string flatpakPermScript: Qt.resolvedUrl("./flatpak_permissions.py").toString().replace("file://", "")
+  property var permFetchQueue: []
+  property int permFetchIndex: 0
+
+  function fetchPermissions() {
+    // Process permission queue one at a time to avoid overwhelming the system
+    if (root.permQueue.length === 0) {
+      enrichBusy = false
+      pumpEnrich()
+      return
+    }
+    var item = root.permQueue.shift()
+    root.permFetchQueue.push(item)
+    permProc.command = ["python3", root.flatpakPermScript, item.appid]
+    permProc.running = false
+    permProc.running = true
+  }
+
+  Process {
+    id: permProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPermissions(text || "")
+    }
+  }
+
+  function applyPermissions(text) {
+    if (root.permFetchQueue.length === 0) return
+    var item = root.permFetchQueue.shift()
+    var idx = item.index
+    var appid = item.appid
+    var data
+    try {
+      data = JSON.parse(text)
+    } catch (e) {
+      // On error, cache empty and continue
+      root.permCache[appid] = { chips: [] }
+      if (root.permQueue.length > 0) {
+        root.fetchPermissions()
+      } else {
+        enrichBusy = false
+        root.pumpEnrich()
+      }
+      return
+    }
+    if (data.error) {
+      root.permCache[appid] = { chips: [] }
+    } else {
+      root.permCache[appid] = data
+      if (idx >= 0 && idx < filteredModel.count) {
+        filteredModel.setProperty(idx, "flatpakPerms", JSON.stringify(data.chips || []))
+      }
+    }
+    // Continue with next in queue
+    if (root.permQueue.length > 0) {
+      root.fetchPermissions()
+    } else {
+      enrichBusy = false
+      root.pumpEnrich()
     }
   }
 
@@ -1687,6 +1845,16 @@ var upd = root.updateSpecFor(r)
     // "vivaldi" left five entries behind (via, vial, vival, vivald, vivaldi)
     // for what the user considers one search. Recording waits for the typing to
     // settle instead — see noteSearch()/flushRecent().
+
+    // Don't launch live search when offline - show cached results only
+    if (root.isOffline) {
+      root.pacmanError = "Offline"
+      root.flatpakError = "Offline"
+      root.aurError = "Offline"
+      root.applyView()
+      return
+    }
+
     var seq = ++searchSeq
     root.pendingGroup = ({})
     root.pacmanError = ""
@@ -1765,7 +1933,7 @@ var upd = root.updateSpecFor(r)
       aurVotes: "", aurMaintainer: "", aurOutdated: "", aurPopularity: "", downloadSize: "",
       installedSize: "", dependsOn: "", optionalDeps: "", requiredBy: "",
       conflictsWith: "", provides: "", groups: "", packager: "",
-      branch: "", collection: ""
+      branch: "", collection: "", flatpakPerms: ""
     }
     // Insertion order. A NUMBER, so the role has one consistent type from the
     // very first append — ListModel cannot change a role's type later, and a
@@ -2093,6 +2261,8 @@ var upd = root.updateSpecFor(r)
   property var enrichQueue: []
   property var localQueue: []
   property var flatpakQueue: []
+  property var permQueue: []
+  property var permCache: ({})
   property bool enrichBusy: false
 
   function requestEnrich() {
@@ -2110,6 +2280,7 @@ var upd = root.updateSpecFor(r)
     enrichQueue = []
     flatpakQueue = []
     localQueue = []
+    permQueue = []
     for (var i = 0; i < filteredModel.count; i++) {
       var e = filteredModel.get(i)
       if (!e || e._pkg === undefined || e._pkg === "") continue
@@ -2125,6 +2296,13 @@ var upd = root.updateSpecFor(r)
       if (e.flatpakPkg === "" || e.flatpakPkg === undefined) {
         flatpakQueue.push({ index: i, name: e.name, pkg: e._pkg })
       }
+      // Queue flatpak rows for permission lookup if not cached
+      if (e.flatpakPkg !== "" && e.flatpakPkg !== undefined) {
+        var fp = e.flatpakPkg
+        if (root.permCache[fp] === undefined) {
+          permQueue.push({ index: i, appid: fp })
+        }
+      }
     }
     pumpEnrich()
   }
@@ -2132,7 +2310,8 @@ var upd = root.updateSpecFor(r)
   // Resolve icons cheapest-first: the batched AppStream-catalog lookup (a ~MB
   // catalog already cached on disk → one fast local scan), then the installed
   // icon-theme lookup (a `pacman -Ql` + /usr/share/icons scan) for rows the
-  // catalog missed, then one batched flathub search for the leftovers.
+  // catalog missed, then one batched flathub search for the leftovers,
+  // then permission lookup for flatpak apps.
   function pumpEnrich() {
     if (enrichBusy) return
     if (enrichQueue.length > 0) {
@@ -2148,6 +2327,12 @@ var upd = root.updateSpecFor(r)
     if (flatpakQueue.length > 0) {
       enrichBusy = true
       launchBatchFlatpak()
+      return
+    }
+    if (permQueue.length > 0) {
+      enrichBusy = true
+      fetchPermissions()
+      return
     }
   }
 
@@ -3322,6 +3507,39 @@ property string terminalRunner: ""   // "" | "xdg" | "<name>"
         onCanceled: root.cancelPendingAction()
       }
 
+      // Categories sidebar overlay — slides in from the right
+      CategorySidebar {
+        id: categorySidebar
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.right: parent.right
+        sidebarVisible: root.categorySidebarOpen
+        z: 5
+        onCategorySelected: function(categoryId, keyword) {
+          // Feed the search FIELD, not root.query. scheduleFilter() re-reads
+          // searchField.text on every change and the debounce commits that
+          // value to root.query -- assigning root.query here was overwritten
+          // by the still-blank field a moment later, which is why picking a
+          // category just bounced back to an empty search bar. This is the
+          // same path the recent-search chips use.
+          searchField.text = keyword
+          // Switch to a source tab that actually supports category keywords.
+          if (!root.isPacman && !root.isFlatpak && !root.isAll) {
+            root.switchTab(0)
+          }
+          root.refocus()
+        }
+        onRequestClose: {
+          root.categorySidebarOpen = false
+        }
+        onVisibleChanged: {
+          if (root.categorySidebarOpen !== categorySidebar.sidebarVisible) {
+            root.categorySidebarOpen = categorySidebar.sidebarVisible
+            root.persistOptions()
+          }
+        }
+      }
+
       Column {
         id: panelColumn
         width: parent.width
@@ -3350,14 +3568,37 @@ property string terminalRunner: ""   // "" | "xdg" | "<name>"
             }
           }
           trailingControl: Component {
-            PanelActionButton {
-              iconText: root.showOptions ? root.icons.close : root.icons.settings
-              tooltipText: root.showOptions ? "Close settings" : "Settings"
-              foreground: Color.popups.text
-              fontFamily: Style.font.resolvedFamily
-              fontSize: Style.font.body
-              focusable: false
-              onClicked: root.showOptions = !root.showOptions
+            Row {
+              spacing: Style.spacing.xxs
+              // Categories sidebar toggle
+              PanelActionButton {
+                id: categoriesBtn
+                iconText: "\uDB81\uDDD8"  // palette (Material Design)
+                tooltipText: "Browse by category (Ctrl+B)"
+                foreground: Color.popups.text
+                fontFamily: Style.font.resolvedFamily
+                fontSize: Style.font.body
+                focusable: false
+                onClicked: root.categorySidebarOpen = !root.categorySidebarOpen
+                // Highlight when sidebar is open
+                Rectangle {
+                  anchors.fill: parent
+                  anchors.margins: -Style.spacing.xs
+                  radius: Style.cornerRadius
+                  color: root.categorySidebarOpen ? Util.alpha(Color.accent, 0.18) : "transparent"
+                  Behavior on color { ColorAnimation { duration: 120 } }
+                  z: -1
+                }
+              }
+              PanelActionButton {
+                iconText: root.showOptions ? root.icons.close : root.icons.settings
+                tooltipText: root.showOptions ? "Close settings" : "Settings"
+                foreground: Color.popups.text
+                fontFamily: Style.font.resolvedFamily
+                fontSize: Style.font.body
+                focusable: false
+                onClicked: root.showOptions = !root.showOptions
+              }
             }
           }
         }
@@ -3735,6 +3976,83 @@ Icon {
               horizontalAlignment: Text.AlignHCenter
             }
 
+            // Density picker
+            Item {
+              width: parent.width
+              implicitHeight: Style.space(30)
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Density"
+                color: Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.spacing.sm
+
+                HelperPill {
+                  label: "Compact"
+                  selected: root.density === "compact"
+                  onClicked: root.setDensity("compact")
+                }
+                HelperPill {
+                  label: "Cozy"
+                  selected: root.density === "cozy"
+                  onClicked: root.setDensity("cozy")
+                }
+                HelperPill {
+                  label: "Spacious"
+                  selected: root.density === "spacious"
+                  onClicked: root.setDensity("spacious")
+                }
+              }
+            }
+
+          }
+        }
+
+        // ------------------------------------------------------- offline banner
+        // Shown when the system is detected as offline
+        Rectangle {
+          width: parent.width
+          implicitHeight: root.isOffline ? Style.space(32) : 0
+          visible: root.isOffline
+          color: Util.alpha(Color.urgent, 0.12)
+          border.width: Style.spacing.hairline
+          border.color: Util.alpha(Color.urgent, 0.4)
+          radius: Style.cornerRadius
+
+          Behavior on implicitHeight {
+            NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+          }
+
+          Row {
+            anchors.fill: parent
+            anchors.margins: Style.spacing.md
+            spacing: Style.spacing.sm
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "\uDB81\uDDD6  Offline — showing cached results only"
+              color: Color.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              textFormat: Text.PlainText
+            }
+
+            Item { Layout.fillWidth: true }
+
+            ActionPill {
+              label: "Retry"
+              onClicked: root.checkOnline()
+            }
           }
         }
 
@@ -4038,9 +4356,24 @@ Icon {
                 }
               }
 
+              // Plain Text has no positionAt(); that API belongs to native
+              // editable controls, which this panel deliberately avoids.
+              // Measure prefixes with TextMetrics instead.
+              TextMetrics {
+                id: caretProbeMetrics
+                font: searchTextItem.font
+                text: ""
+              }
+
               function caretAt(x) {
-                return Math.max(0, Math.min(text.length,
-                       searchTextItem.positionAt(x, searchTextItem.height / 2)))
+                var s = searchField.text
+                var best = 0
+                for (var i = 1; i <= s.length; i++) {
+                  caretProbeMetrics.text = s.substring(0, i)
+                  if (caretProbeMetrics.advanceWidth > x) break
+                  best = i
+                }
+                return best
               }
 
               // One Keys.onPressed rather than per-key handlers: Qt skips the
@@ -4145,6 +4478,12 @@ Icon {
                   // Shown in the sort row's own label, which is where the
                   // control and its hint sit together.
                   if (root.isLive) root.cycleSort()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_B && (event.modifiers & Qt.ControlModifier)) {
+                  // Toggle the categories sidebar. Ctrl+B is free (B = Browse)
+                  // and mnemonic. Works from anywhere in the panel since the
+                  // search field owns focus.
+                  root.categorySidebar.sidebarVisible = !root.categorySidebar.sidebarVisible
                   event.accepted = true
                 } else if (event.key === Qt.Key_H && (event.modifiers & Qt.ControlModifier)) {
                   // Hide / show packages already installed.
@@ -4312,6 +4651,48 @@ Icon {
           }
         }
 
+        // ------------------------------------------------------- update all button
+        // Shown only on the Updates tab when there are updates available.
+        Item {
+          width: parent.width
+          implicitHeight: root.isUpdates && root.updateCount > 0 ? Style.space(36) : 0
+          visible: root.isUpdates && root.updateCount > 0
+
+          Behavior on implicitHeight {
+            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+          }
+
+          Rectangle {
+            anchors.fill: parent
+            anchors.margins: Style.spacing.md
+            radius: Style.cornerRadius
+            color: Util.alpha(Color.accent, 0.1)
+            border.width: Style.spacing.hairline
+            border.color: Util.alpha(Color.accent, 0.3)
+
+            Row {
+              anchors.centerIn: parent
+              spacing: Style.spacing.sm
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Update all (" + root.updateCount + ")"
+                color: Color.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                textFormat: Text.PlainText
+              }
+
+              ActionPill {
+                label: "Update All"
+                visible: root.batchGroups("update").length > 0 && !root.batchRunning
+                onClicked: root.startBatch("update")
+              }
+            }
+          }
+        }
+
         // ----------------------------------------------------------- results
         Item {
           width: parent.width
@@ -4352,6 +4733,8 @@ Icon {
               required property string pacmanPkg
               required property string aurPkg
               required property string flatpakPkg
+              // Flatpak permission chips (JSON string of [[icon, label], ...])
+              required property string flatpakPerms
               // Every model row now carries the full role set (see addRow), so
               // these must be `required` for the delegate to bind to the model
               // roles. A non-required property would NOT be auto-bound to its
@@ -4609,6 +4992,7 @@ Icon {
                         label: modelData.label
                         value: modelData.value
                         highlight: modelData.label === "Update"
+                        isPerm: modelData.isPerm === true
                       }
                     }
                   }
@@ -4902,6 +5286,7 @@ Icon {
           Hint { keys: "F2"; label: "Details" }
           Item { Layout.fillWidth: true }
           Hint { keys: "Tab"; label: "Source" }
+          Hint { keys: "Ctrl+B"; label: "Categories" }
           Hint { keys: "Esc"; label: root.selectedCount > 0 ? "Clear" : "Close" }
         }
       }
@@ -5122,11 +5507,13 @@ Icon {
     // chip opts into the confirm tint so the one fact on the card that changes
     // what you would DO about it is the one that stands out.
     property bool highlight: false
+    // Flatpak permission chip: value is an emoji/icon, show it as a standalone badge
+    property bool isPerm: false
 
     implicitHeight: Style.space(20)
     implicitWidth: chipRow.implicitWidth + Style.space(10)
     radius: Math.max(2, Style.cornerRadius - Style.space(1))
-    color: chip.highlight ? Util.alpha(root.confirmColor, 0.14) : Util.alpha(Color.popups.text, 0.055)
+    color: chip.highlight ? Util.alpha(root.confirmColor, 0.14) : (chip.isPerm ? Util.alpha(Color.accent, 0.12) : Util.alpha(Color.popups.text, 0.055))
 
     Row {
       id: chipRow
@@ -5135,7 +5522,7 @@ Icon {
 
       Text {
         text: chip.label
-        color: chip.highlight ? Util.alpha(root.confirmColor, 0.55) : Util.alpha(Color.popups.text, 0.42)
+        color: chip.highlight ? Util.alpha(root.confirmColor, 0.55) : (chip.isPerm ? Color.accent : Util.alpha(Color.popups.text, 0.42))
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.letterSpacing: 0.4
@@ -5144,7 +5531,7 @@ Icon {
       }
       Text {
         text: chip.value
-        color: chip.highlight ? root.confirmColor : Util.alpha(Color.popups.text, 0.82)
+        color: chip.highlight ? root.confirmColor : (chip.isPerm ? Color.accent : Util.alpha(Color.popups.text, 0.82))
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: true
