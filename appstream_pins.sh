@@ -37,18 +37,18 @@
 # installed by pacman, /usr/share/swcatalog is used instead and these pins are
 # irrelevant. Tests may override via FOSSFETCH_PINNED_VER / FOSSFETCH_PINNED_SUMS
 # (documents the exact pin under test; shipping defaults remain these constants).
-PINNED_PKGVER='20260821'
+PINNED_PKGVER='20261017'
 PINNED_SHA256SUMS=(
-  '170ef4957375bbcc323742b52c7bca6ad87dcf15ce6a5b0ef57992c3e0f19bee' # core     xml
-  '7989bb311baa38ef545250282aa065d23281c46dfb8faabe4c653487bdbded5c' # core   48x48
-  'eeb7667241ac81e266de1c8246384ec25722ed2b942293bb4d2009178b7fc4f2' # core   64x64
-  '7989bb311baa38ef545250282aa065d23281c46dfb8faabe4c653487bdbded5c' # core  128x128
-  '60716951977b405d9dea4b8c3c64dc73eab40d777a60cf22633fb149af3bbb93' # extra     xml
-  'ca1abf84f1c05f407cf64b6f3d096b736b420931af685ff4dadadb49d1057f40' # extra   48x48
-  '0afb0aaacb5ef3fa988d54ca3d062ce82e14f14feac8385981c6ba2b0db650a6' # extra   64x64
-  '272ab715b8f629e5245f892cfb3938f6630f2d9ffbe6dd7ab70a17bce4c79e3a' # extra  128x128
-  '483b5dbf75ca736388d98dc1845538238a3d210dda825f6315c4341ee0761f9c' # multilib  xml
-  '1b5c3906201fcf47e78969262c4c4de3567819765e5611745384583c32c61761' # multilib 48x48
-  '63fc7af8ad16dbecea0477ddd0257518a1c8f411432db87d8254e8431464c3d0' # multilib 64x64
-  'c83722fc4d223ae4a7cb64e030b3f94812ca69d133aa768cef01f50102f2e737' # multilib128x128
+  'bc06c251da2da941afb1579168bf5bce28d5b34f9a4e67f3c1ce7cc986bed581' # core     xml
+  '7989bb311baa38ef545250282aa065d23281c46dfb8faabe4c653487bdbded5c' # core     icons-48x48
+  '7989bb311baa38ef545250282aa065d23281c46dfb8faabe4c653487bdbded5c' # core     icons-64x64
+  '7989bb311baa38ef545250282aa065d23281c46dfb8faabe4c653487bdbded5c' # core     icons-128x128
+  '3422355b84833bb71ab495e5b994844fd8e3bd9361d7e335f218c40b2ed75f7e' # extra    xml
+  '1aff115a28e62fbd1f978dab398dd532643fd1bea4ee0f90e2031e052e232978' # extra    icons-48x48
+  '8bf13d29b7d89f61e6945f836655f95e007d9ea649b18393363d37f5f65d4ab2' # extra    icons-64x64
+  '6a75765dcbb0986a9996b79ed2aca88600196e121b85b0f46623189f24396f07' # extra    icons-128x128
+  '26fc66ee7c0649d4c710b87e8a83f7ace3ff3a5d9c10b9d2160580f6d414f282' # multilib xml
+  '32cd219eae6e0035f53245c9b785493db9387f9f5ae94e2a75ca4778ca978551' # multilib icons-48x48
+  '971cf619e46dfe6ec11d80a13277163f28fc34339301e348b88e1af696db914a' # multilib icons-64x64
+  'ef07fc8ace613ef56052003a7850a5b2bb948dd28a6f601d595530bfc863dfb3' # multilib icons-128x128
 )
